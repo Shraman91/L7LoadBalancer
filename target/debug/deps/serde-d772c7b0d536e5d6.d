@@ -1,0 +1,14 @@
+C:\Users\vkdgs\OneDrive\Desktop\Projects\l7-load-balancer\target\debug\deps\serde-d772c7b0d536e5d6.d: C:\Users\vkdgs\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\lib.rs C:\Users\vkdgs\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\integer128.rs C:\Users\vkdgs\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\mod.rs C:\Users\vkdgs\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\de.rs C:\Users\vkdgs\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\ser.rs C:\Users\vkdgs\OneDrive\Desktop\Projects\l7-load-balancer\target\debug\build\serde-774097fa1c790350\out/private.rs
+
+C:\Users\vkdgs\OneDrive\Desktop\Projects\l7-load-balancer\target\debug\deps\libserde-d772c7b0d536e5d6.rlib: C:\Users\vkdgs\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\lib.rs C:\Users\vkdgs\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\integer128.rs C:\Users\vkdgs\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\mod.rs C:\Users\vkdgs\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\de.rs C:\Users\vkdgs\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\ser.rs C:\Users\vkdgs\OneDrive\Desktop\Projects\l7-load-balancer\target\debug\build\serde-774097fa1c790350\out/private.rs
+
+C:\Users\vkdgs\OneDrive\Desktop\Projects\l7-load-balancer\target\debug\deps\libserde-d772c7b0d536e5d6.rmeta: C:\Users\vkdgs\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\lib.rs C:\Users\vkdgs\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\integer128.rs C:\Users\vkdgs\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\mod.rs C:\Users\vkdgs\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\de.rs C:\Users\vkdgs\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\ser.rs C:\Users\vkdgs\OneDrive\Desktop\Projects\l7-load-balancer\target\debug\build\serde-774097fa1c790350\out/private.rs
+
+C:\Users\vkdgs\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\lib.rs:
+C:\Users\vkdgs\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\integer128.rs:
+C:\Users\vkdgs\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\mod.rs:
+C:\Users\vkdgs\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\de.rs:
+C:\Users\vkdgs\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\ser.rs:
+C:\Users\vkdgs\OneDrive\Desktop\Projects\l7-load-balancer\target\debug\build\serde-774097fa1c790350\out/private.rs:
+
+# env-dep:OUT_DIR=C:\\Users\\vkdgs\\OneDrive\\Desktop\\Projects\\l7-load-balancer\\target\\debug\\build\\serde-774097fa1c790350\\out
