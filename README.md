@@ -1,44 +1,81 @@
-# l7lb — a small Layer 7 (HTTP) load balancer in Rust
+# l7lb — A Layer 7 (HTTP) Load Balancer in Rust
 
-A reverse proxy / load balancer built on `tokio` + `hyper` directly (no
-web framework), with pluggable balancing algorithms and active health
-checks. Built as a portfolio project to demonstrate async Rust, trait-based
-design, and basic distributed-systems concepts.
+A lightweight HTTP reverse proxy and load balancer built directly on [`tokio`](https://tokio.rs) and [`hyper`](https://hyper.rs) — no web framework. It distributes incoming requests across a pool of backend servers using pluggable balancing algorithms, and automatically stops routing to backends that fail their health checks.
+
+## Table of Contents
+
+- [What is a Layer 7 load balancer?](#what-is-a-layer-7-load-balancer)
+- [Features](#features)
+- [Architecture](#architecture)
+- [Project structure](#project-structure)
+- [Getting started](#getting-started)
+- [Configuration](#configuration)
+- [Balancing algorithms](#balancing-algorithms)
+- [Health checks](#health-checks)
+- [Design decisions](#design-decisions)
+- [Roadmap](#roadmap)
+
+## What is a Layer 7 load balancer?
+
+A Layer 4 (TCP) load balancer forwards raw bytes and knows nothing about what's inside them. A **Layer 7** load balancer operates at the application layer: it terminates the client's HTTP connection, understands the request, picks a backend, and forwards the request on the client's behalf. That's what lets it make smarter routing decisions and hide the backend pool behind a single address.
+
+```
+                    ┌──────────► Backend :9001
+Client ──► l7lb ────┼──────────► Backend :9002
+          :8080     └──────────► Backend :9003
+```
 
 ## Features
 
-- **Reverse proxy** — accepts HTTP/1.1 (and HTTP/2 via `hyper-util`'s auto
-  builder) connections and forwards them to a backend pool, streaming
-  request/response bodies rather than buffering them in memory.
-- **Pluggable algorithms** via a `LoadBalancer` trait:
-  - `round_robin` — cycles through healthy backends in order
-  - `weighted_round_robin` — smooth WRR (same algorithm nginx uses), so
-    higher-weight backends get proportionally more traffic without bursting
-  - `least_connections` — routes to the healthy backend with the fewest
-    active connections
-- **Active health checks** — a background task per backend polls a
-  configurable path on an interval, with configurable healthy/unhealthy
-  thresholds so a single flaky probe doesn't flip state.
-- **Config-driven** — backends, algorithm, and health check parameters
-  live in `config.toml`, no recompilation needed to change topology.
+- **Reverse proxy** — accepts HTTP/1.1 and HTTP/2 connections (via `hyper-util`'s auto builder) and forwards them to the backend pool.
+- **Streaming bodies** — request and response bodies are streamed through rather than buffered in memory, so large uploads and downloads don't inflate memory usage or add latency.
+- **Three balancing algorithms** behind a common `LoadBalancer` trait:
+  - `round_robin`
+  - `weighted_round_robin` (smooth weighted round robin, the same approach nginx uses)
+  - `least_connections`
+- **Active health checks** — a background task per backend probes a configurable path on a fixed interval, with separate healthy/unhealthy thresholds to prevent flapping.
+- **Automatic failover and recovery** — unhealthy backends are removed from rotation and re-added once they pass enough consecutive probes.
+- **Config-driven** — backends, algorithm, and health-check parameters live in a TOML file; change the topology without recompiling.
+- **Lock-free hot path** — per-backend health and connection counts are atomics, so backend selection doesn't contend on a mutex.
+- **Built-in mock backend** — a tiny test server is included so you can try everything locally.
 
-## Folder structure
+## Architecture
 
 ```
-l7-load-balancer/
+            ┌──────────────────────────────────────────────┐
+            │                    l7lb                      │
+            │                                              │
+ request ──►│  server ──► proxy ──► balancer.select() ─────┼──► backend
+            │  (accept)   (handler)   (rr / wrr / lc)      │
+            │                              ▲               │
+            │                              │ healthy?      │
+            │  health checker (1 task per backend) ────────┼──► GET /health
+            └──────────────────────────────────────────────┘
+```
+
+1. **Server** accepts TCP connections and serves them with hyper.
+2. **Proxy handler** takes each request and asks the configured balancer for a backend.
+3. **Balancer** picks from the currently *healthy* backends according to its algorithm.
+4. The request is forwarded to the chosen backend and the response is streamed back to the client.
+5. Meanwhile, **health-check tasks** continuously probe every backend and update its shared health state.
+
+## Project structure
+
+```
+L7LoadBalancer/
 ├── Cargo.toml
-├── config.toml              # sample config: backends, algorithm, health checks
+├── config.toml                  # sample config: backends, algorithm, health checks
 ├── README.md
 └── src/
-    ├── main.rs               # CLI parsing, wiring, startup
-    ├── config.rs             # TOML config structs + loading
-    ├── backend.rs            # runtime Backend state (health, conn count)
-    ├── state.rs              # shared AppState (backends, balancer, client)
-    ├── proxy.rs               # per-request proxy handler
-    ├── server.rs              # TCP accept loop / hyper server wiring
-    ├── health.rs               # background health-check tasks
+    ├── main.rs                  # CLI parsing, wiring, startup
+    ├── config.rs                # TOML config structs + loading
+    ├── backend.rs               # runtime backend state (health, connection count)
+    ├── state.rs                 # shared AppState (backends, balancer, HTTP client)
+    ├── proxy.rs                 # per-request proxy handler
+    ├── server.rs                # TCP accept loop / hyper server wiring
+    ├── health.rs                # background health-check tasks
     ├── balancer/
-    │   ├── mod.rs              # LoadBalancer trait
+    │   ├── mod.rs               # LoadBalancer trait
     │   ├── round_robin.rs
     │   ├── weighted_round_robin.rs
     │   └── least_connections.rs
@@ -46,9 +83,23 @@ l7-load-balancer/
         └── mock_backend.rs      # tiny test backend for local demos
 ```
 
-## Running it locally
+## Getting started
 
-Start three mock backends in separate terminals:
+### Prerequisites
+
+- [Rust](https://www.rust-lang.org/tools/install) (stable toolchain, installed via `rustup`)
+
+### 1. Clone and build
+
+```bash
+git clone https://github.com/Shraman91/L7LoadBalancer.git
+cd L7LoadBalancer
+cargo build --release
+```
+
+### 2. Start some backends
+
+Run three mock backends, each in its own terminal:
 
 ```bash
 cargo run --bin mock_backend -- 9001
@@ -56,56 +107,111 @@ cargo run --bin mock_backend -- 9002
 cargo run --bin mock_backend -- 9003
 ```
 
-Then start the load balancer (uses `config.toml` by default):
+### 3. Start the load balancer
+
+It reads `config.toml` from the current directory by default:
 
 ```bash
 cargo run --bin l7lb
-# or: cargo run --bin l7lb -- --config path/to/other.toml
 ```
 
-Hit it and watch requests get distributed:
+To use a different config file:
+
+```bash
+cargo run --bin l7lb -- --config path/to/other.toml
+```
+
+### 4. Send traffic
 
 ```bash
 for i in {1..6}; do curl -s http://127.0.0.1:8080/; done
 ```
 
-Kill one of the mock backends and watch the health checker mark it
-unhealthy (log line) and stop routing to it; bring it back and it
-recovers after `healthy_threshold` consecutive successful probes.
+You should see the responses spread across the backends.
 
-## Design notes / things worth mentioning in an interview
+### 5. Try failover
 
-- **Why hyper directly instead of a framework**: a load balancer's hot
-  path is "accept connection → pick backend → forward" — there's no
-  routing/templating/middleware need that would justify a framework, and
-  building on raw `hyper` demonstrates understanding of the underlying
-  primitives (`Body`/`Incoming`, connection builders, services).
-- **Streaming bodies**: request/response bodies are passed through as
-  `hyper::body::Incoming` / boxed bodies rather than buffered into
-  `Vec<u8>`, so the proxy doesn't blow up memory on large uploads/downloads
-  and doesn't add latency waiting for a full body before forwarding.
-- **Health check debouncing**: threshold-based flapping prevention
-  (`unhealthy_threshold` / `healthy_threshold`) rather than flipping state
-  on a single probe result, which is how most production load balancers
-  (nginx, HAProxy, ALB) behave.
-- **Smooth weighted round robin**: implemented the nginx algorithm
-  (accumulate weight each tick, pick the max, subtract total) rather than
-  naive "repeat backend N times in a list", because the naive version
-  bursts N consecutive requests at the heavy backend instead of spreading
-  them out.
-- **Lock-free hot path**: backend health/connection-count state uses
-  atomics (`AtomicBool`, `AtomicUsize`, `AtomicI64`) instead of
-  `Mutex`/`RwLock`, since the balancer's `select()` is called on every
-  single request.
+1. Stop one of the mock backends (`Ctrl+C`).
+2. After `unhealthy_threshold` failed probes, `l7lb` logs the backend as unhealthy and stops routing to it.
+3. Re-run the curl loop — traffic now goes only to the remaining backends.
+4. Restart the backend. After `healthy_threshold` consecutive successful probes, it rejoins the rotation.
 
-## Possible extensions (good "future work" talking points)
+## Configuration
 
-- TLS termination (`rustls`) on the listener side
-- Sticky sessions (consistent hashing on client IP or a cookie)
-- Circuit breaking / retries with backoff on 5xx from a backend
-- Passive health checks (mark unhealthy based on live request failures,
-  not just the background prober)
-- Prometheus metrics endpoint (`/metrics`) — request counts, latency
-  histograms, per-backend health state
-- Graceful shutdown / connection draining on SIGTERM
-- Config hot-reload (watch `config.toml`, add/remove backends without restart)
+`config.toml`:
+
+```toml
+listen_addr = "0.0.0.0:8080"
+algorithm   = "round_robin"
+
+[health_check]
+path                = "/health"
+interval_secs       = 5
+timeout_secs        = 2
+unhealthy_threshold = 3
+healthy_threshold   = 2
+
+[[backends]]
+addr   = "127.0.0.1:9001"
+weight = 1
+
+[[backends]]
+addr   = "127.0.0.1:9002"
+weight = 1
+
+[[backends]]
+addr   = "127.0.0.1:9003"
+weight = 2
+```
+
+| Key | Description |
+| --- | --- |
+| `listen_addr` | Address and port the load balancer listens on. |
+| `algorithm` | `round_robin`, `weighted_round_robin`, or `least_connections`. |
+| `health_check.path` | HTTP path probed on every backend. |
+| `health_check.interval_secs` | Seconds between probes. |
+| `health_check.timeout_secs` | Seconds before a probe is counted as failed. |
+| `health_check.unhealthy_threshold` | Consecutive failures before a backend is marked unhealthy. |
+| `health_check.healthy_threshold` | Consecutive successes before an unhealthy backend is marked healthy again. |
+| `backends[].addr` | Backend address (`host:port`). |
+| `backends[].weight` | Relative share of traffic. Used by `weighted_round_robin`. |
+
+## Balancing algorithms
+
+| Algorithm | How it picks a backend | Best for |
+| --- | --- | --- |
+| `round_robin` | Cycles through healthy backends in order. | Homogeneous backends with similar request costs. |
+| `weighted_round_robin` | Smooth WRR: each tick every backend's running weight increases by its configured weight, the highest is chosen, then the total weight is subtracted from it. | Backends with different capacities. |
+| `least_connections` | Chooses the healthy backend with the fewest active connections. | Requests with widely varying durations. |
+
+> **Note:** `weight` only has an effect with `weighted_round_robin`. To see it in action with the sample config (backend `:9003` has weight 2), set `algorithm = "weighted_round_robin"` and re-run the curl loop — `:9003` should receive about half the traffic.
+
+## Health checks
+
+Each backend gets its own background task that requests `health_check.path` every `interval_secs`. A probe fails if the backend doesn't respond successfully within `timeout_secs`.
+
+State changes are **debounced** with thresholds instead of flipping on a single result:
+
+- A healthy backend becomes **unhealthy** after `unhealthy_threshold` consecutive failures.
+- An unhealthy backend becomes **healthy** after `healthy_threshold` consecutive successes.
+
+With the sample config, a backend is removed after 3 failed probes (~15 s) and restored after 2 successful ones (~10 s).
+
+## Design decisions
+
+- **`hyper` directly instead of a web framework.** The hot path of a load balancer is "accept → pick backend → forward." There's no routing, templating, or middleware to justify a framework, and working with hyper's primitives keeps the proxy small and explicit.
+- **Streaming instead of buffering.** Bodies are passed through as streams, so memory stays flat regardless of payload size and forwarding starts before the full body arrives.
+- **Threshold-based health checks.** Debouncing avoids flapping on a single slow or dropped probe, matching how production load balancers such as nginx, HAProxy, and AWS ALB behave.
+- **Smooth weighted round robin.** The naive approach (repeat each backend `weight` times in a list) sends bursts of consecutive requests to heavy backends. The smooth variant interleaves them evenly.
+- **Atomics on the hot path.** `select()` runs on every request, so backend state uses `AtomicBool`, `AtomicUsize`, and `AtomicI64` rather than `Mutex`/`RwLock`.
+- **Trait-based algorithms.** Adding a new strategy means implementing the `LoadBalancer` trait in `src/balancer/` — nothing else in the proxy changes.
+
+## Roadmap
+
+- [ ] TLS termination (`rustls`)
+- [ ] Sticky sessions (consistent hashing on client IP or cookie)
+- [ ] Retries with backoff and circuit breaking on backend 5xx
+- [ ] Passive health checks based on live request failures
+- [ ] Prometheus `/metrics` endpoint (request counts, latency histograms, per-backend health)
+- [ ] Graceful shutdown and connection draining on SIGTERM
+- [ ] Config hot-reload without restart
