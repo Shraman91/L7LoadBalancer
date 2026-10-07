@@ -1,5 +1,6 @@
 use super::LoadBalancer;
 use crate::backend::Backend;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 pub struct LeastConnections;
@@ -10,11 +11,21 @@ impl LeastConnections {
     }
 }
 
+impl Default for LeastConnections {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LoadBalancer for LeastConnections {
-    fn select(&self, backends: &[Arc<Backend>]) -> Option<Arc<Backend>> {
+    fn select_excluding(
+        &self,
+        backends: &[Arc<Backend>],
+        excluded: &[SocketAddr],
+    ) -> Option<Arc<Backend>> {
         backends
             .iter()
-            .filter(|b| b.is_healthy())
+            .filter(|b| !excluded.contains(&b.addr) && b.is_available())
             .min_by_key(|b| b.connections())
             .map(Arc::clone)
     }

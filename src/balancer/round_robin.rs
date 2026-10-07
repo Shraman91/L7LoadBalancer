@@ -1,5 +1,6 @@
 use super::LoadBalancer;
 use crate::backend::Backend;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -15,8 +16,18 @@ impl RoundRobin {
     }
 }
 
+impl Default for RoundRobin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LoadBalancer for RoundRobin {
-    fn select(&self, backends: &[Arc<Backend>]) -> Option<Arc<Backend>> {
+    fn select_excluding(
+        &self,
+        backends: &[Arc<Backend>],
+        excluded: &[SocketAddr],
+    ) -> Option<Arc<Backend>> {
         let len = backends.len();
         if len == 0 {
             return None;
@@ -25,7 +36,7 @@ impl LoadBalancer for RoundRobin {
         for _ in 0..len {
             let idx = self.cursor.fetch_add(1, Ordering::Relaxed) % len;
             let candidate = &backends[idx];
-            if candidate.is_healthy() {
+            if !excluded.contains(&candidate.addr) && candidate.is_available() {
                 return Some(Arc::clone(candidate));
             }
         }

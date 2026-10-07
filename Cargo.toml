@@ -3,6 +3,10 @@ name = "l7-load-balancer"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "l7_load_balancer"
+path = "src/lib.rs"
+
 [[bin]]
 name = "l7lb"
 path = "src/main.rs"
@@ -19,7 +23,21 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
+thiserror = "1.0"
+rand = "0.8"
+tokio-util = { version = "0.7", features = ["full"] }
+futures-util = "0.3"
+
+[profile.dev]
+incremental = false
+codegen-units = 1
+
+[profile.test]
+incremental = false
+codegen-units = 1
 
 [profile.release]
 lto = true
 opt-level = 3
+incremental = false
+codegen-units = 1

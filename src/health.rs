@@ -8,21 +8,34 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 pub type HttpClient = Client<HttpConnector, Empty<Bytes>>;
 
-pub fn spawn_health_checks(backends: Vec<Arc<Backend>>, cfg: HealthCheckConfig) {
+pub fn spawn_health_checks(
+    backends: Vec<Arc<Backend>>,
+    cfg: HealthCheckConfig,
+    cancel: CancellationToken,
+) {
     let client: HttpClient = Client::builder(TokioExecutor::new()).build(HttpConnector::new());
 
     for backend in backends {
         let client = client.clone();
         let cfg = cfg.clone();
+        let cancel = cancel.clone();
         tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(Duration::from_secs(cfg.interval_secs));
+            let mut ticker = tokio::time::interval(Duration::from_secs(cfg.interval_secs.max(1)));
             loop {
-                ticker.tick().await;
-                let ok = probe(&client, &backend, &cfg).await;
-                backend.record_check(ok, cfg.unhealthy_threshold, cfg.healthy_threshold);
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        tracing::debug!(backend = %backend.addr, "health check loop cancelled");
+                        break;
+                    }
+                    _ = ticker.tick() => {
+                        let ok = probe(&client, &backend, &cfg).await;
+                        backend.record_active_check(ok, cfg.unhealthy_threshold, cfg.healthy_threshold);
+                    }
+                }
             }
         });
     }
@@ -39,7 +52,7 @@ async fn probe(client: &HttpClient, backend: &Backend, cfg: &HealthCheckConfig) 
     };
 
     let call = client.request(req);
-    match tokio::time::timeout(Duration::from_secs(cfg.timeout_secs), call).await {
+    match tokio::time::timeout(Duration::from_secs(cfg.timeout_secs.max(1)), call).await {
         Ok(Ok(resp)) => resp.status().is_success(),
         Ok(Err(e)) => {
             tracing::debug!(backend = %backend.addr, error = %e, "health check request failed");
