@@ -1,0 +1,111 @@
+# Production Multi-Pool L7 Load Balancer Configuration
+
+listen_addr = "0.0.0.0:8080"
+
+[admin]
+enabled = true
+addr = "127.0.0.1:9090"
+
+[timeouts]
+connect_secs = 3
+idle_keepalive_secs = 60
+request_timeout_secs = 10
+
+[limits]
+max_request_header_size_bytes = 65536
+max_body_size_bytes = 10485760 # 10 MB
+
+[retry]
+enabled = true
+max_attempts = 3
+initial_backoff_ms = 50
+max_backoff_ms = 1000
+retry_budget_percent = 20
+
+[circuit_breaker]
+enabled = true
+consecutive_failures = 5
+cooldown_secs = 15
+half_open_max_trials = 3
+half_open_successes_to_close = 2
+
+[slow_start]
+enabled = true
+window_secs = 30
+
+[health_check]
+path = "/health"
+interval_secs = 5
+timeout_secs = 2
+unhealthy_threshold = 3
+healthy_threshold = 2
+
+default_pool = "web"
+
+# Routing rules (longest-prefix match wins, host match takes precedence)
+[[routes]]
+host = "api.example.com"
+path_prefix = "/api/v1/"
+pool = "api"
+strip_prefix = true
+
+[[routes]]
+path_prefix = "/user/"
+pool = "stateful"
+rewrite_prefix = "/internal/user/"
+
+[[routes]]
+path_prefix = "/static/"
+pool = "static"
+strip_prefix = false
+
+# Backend Pools
+
+# Web pool with moving average latency (EWMA) balancing
+[pools.web]
+algorithm = "least_response_time"
+
+[[pools.web.backends]]
+addr = "127.0.0.1:9001"
+weight = 1
+
+[[pools.web.backends]]
+addr = "127.0.0.1:9002"
+weight = 2
+
+# API pool with Power of Two random choices (P2C) balancing
+[pools.api]
+algorithm = "power_of_two_choices"
+
+[[pools.api.backends]]
+addr = "127.0.0.1:9011"
+weight = 1
+
+[[pools.api.backends]]
+addr = "127.0.0.1:9012"
+weight = 1
+
+# Stateful pool with Ketama-style Consistent Hashing (sticky sessions)
+# Supported hash_key targets:
+# - "client_ip"
+# - "header:<Header-Name>" (e.g. "header:X-User-Id")
+# - "cookie:<Cookie-Name>" (e.g. "cookie:SESSIONID")
+[pools.stateful]
+algorithm = "consistent_hash"
+hash_key = "cookie:SESSIONID"
+
+[[pools.stateful.backends]]
+addr = "127.0.0.1:9021"
+weight = 1
+
+[[pools.stateful.backends]]
+addr = "127.0.0.1:9022"
+weight = 1
+
+# Static assets pool with round-robin
+[pools.static]
+algorithm = "round_robin"
+
+[[pools.static.backends]]
+addr = "127.0.0.1:9031"
+weight = 1

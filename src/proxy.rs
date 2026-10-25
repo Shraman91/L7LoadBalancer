@@ -1,5 +1,5 @@
 use crate::retry::is_idempotent_method;
-use crate::state::AppState;
+use crate::state::{AppState, HashKeyTarget};
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
@@ -10,7 +10,7 @@ use hyper_util::rt::TokioIo;
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub type BoxedBody = BoxBody<Bytes, hyper::Error>;
 
@@ -185,6 +185,54 @@ async fn handle_inner(
         }
     }
 
+    // 3. Match route and determine pool
+    let host = req
+        .headers()
+        .get(hyper::header::HOST)
+        .and_then(|v| v.to_str().ok());
+
+    let raw_path_and_query = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/")
+        .to_string();
+
+    let route_res = state.router.route(host, &raw_path_and_query);
+    let pool = state
+        .pools
+        .get(route_res.pool)
+        .cloned()
+        .unwrap_or_else(|| Arc::clone(state.default_pool()));
+    let target_path_and_query = route_res.path_and_query;
+
+    // 4. Extract consistent hash key if configured
+    let hash_key: Option<String> = match &pool.hash_target {
+        Some(HashKeyTarget::Ip) => Some(client_addr.ip().to_string()),
+        Some(HashKeyTarget::Header(h)) => req
+            .headers()
+            .get(h.as_str())
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string()),
+        Some(HashKeyTarget::Cookie(c)) => req
+            .headers()
+            .get(hyper::header::COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|cookies| {
+                cookies.split(';').find_map(|pair| {
+                    let mut parts = pair.trim().splitn(2, '=');
+                    let k = parts.next()?.trim();
+                    let v = parts.next()?.trim();
+                    if k == c {
+                        Some(v.to_string())
+                    } else {
+                        None
+                    }
+                })
+            }),
+        None => None,
+    };
+
     let is_upgrade = req.headers().get(hyper::header::UPGRADE).is_some()
         || req
             .headers()
@@ -197,13 +245,6 @@ async fn handle_inner(
     let can_retry = is_idempotent && !is_upgrade && req.body().is_end_stream();
 
     let method = req.method().clone();
-    let path_and_query = req
-        .uri()
-        .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or("/")
-        .to_string();
-
     let original_headers = req.headers().clone();
     let req_upgrade = if is_upgrade {
         Some(hyper::upgrade::on(&mut req))
@@ -226,20 +267,21 @@ async fn handle_inner(
     loop {
         attempt += 1;
 
-        let backend = match state
-            .balancer
-            .select_excluding(&state.backends, &excluded_backends)
-        {
+        let backend = match pool.balancer.select_with_key(
+            &pool.backends,
+            &excluded_backends,
+            hash_key.as_deref(),
+        ) {
             Some(b) => b,
             None => {
                 if attempt == 1 {
-                    tracing::warn!("no healthy backends available");
+                    tracing::warn!(pool = %pool.name, "no healthy backends available in pool");
                     return Ok(error_response(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "503 Service Unavailable: No healthy backends\n",
                     ));
                 } else {
-                    tracing::warn!("no additional healthy backends available for retry");
+                    tracing::warn!(pool = %pool.name, "no additional healthy backends available for retry");
                     return Ok(error_response(
                         StatusCode::BAD_GATEWAY,
                         "502 Bad Gateway: Upstream request failed\n",
@@ -248,7 +290,7 @@ async fn handle_inner(
             }
         };
 
-        let new_uri_str = format!("http://{}{}", backend.addr, path_and_query);
+        let new_uri_str = format!("http://{}{}", backend.addr, target_path_and_query);
         let new_uri = match new_uri_str.parse::<Uri>() {
             Ok(u) => u,
             Err(e) => {
@@ -287,12 +329,14 @@ async fn handle_inner(
             }
         };
 
+        let start_time = Instant::now();
         backend.inc_connections();
         let timeout_dur =
             Duration::from_secs(state.config.timeouts.upstream_response_header_secs.max(1));
         let upstream_call = state.client.request(upstream_req);
         let result = tokio::time::timeout(timeout_dur, upstream_call).await;
         backend.dec_connections();
+        let elapsed = start_time.elapsed();
 
         match result {
             Ok(Ok(mut resp)) => {
@@ -327,6 +371,7 @@ async fn handle_inner(
                         state.config.passive_health_check.unhealthy_threshold,
                     );
                 } else {
+                    backend.record_latency(elapsed);
                     backend.record_passive_check(
                         true,
                         state.config.passive_health_check.unhealthy_threshold,

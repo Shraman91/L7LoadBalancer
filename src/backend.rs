@@ -13,7 +13,7 @@ fn now_millis() -> u64 {
 #[derive(Debug)]
 pub struct Backend {
     pub addr: SocketAddr,
-    pub weight: u32,
+    pub weight: AtomicU32,
 
     pub healthy: AtomicBool,
     pub draining: AtomicBool,
@@ -24,6 +24,7 @@ pub struct Backend {
     pub consecutive_passive_failures: AtomicU32,
 
     pub healthy_since_millis: AtomicU64,
+    pub ewma_latency_micros: AtomicU64,
     pub circuit_breaker: CircuitBreaker,
 }
 
@@ -31,7 +32,7 @@ impl Backend {
     pub fn new(addr: SocketAddr, weight: u32, cb_config: CircuitBreakerConfig) -> Self {
         Self {
             addr,
-            weight,
+            weight: AtomicU32::new(weight),
 
             healthy: AtomicBool::new(true),
             draining: AtomicBool::new(false),
@@ -40,12 +41,29 @@ impl Backend {
             consecutive_successes: AtomicU32::new(0),
             consecutive_passive_failures: AtomicU32::new(0),
             healthy_since_millis: AtomicU64::new(now_millis()),
+            ewma_latency_micros: AtomicU64::new(0),
             circuit_breaker: CircuitBreaker::new(cb_config),
         }
     }
 
+    pub fn weight(&self) -> u32 {
+        self.weight.load(Ordering::Relaxed)
+    }
+
+    pub fn set_weight(&self, weight: u32) {
+        self.weight.store(weight, Ordering::Relaxed);
+    }
+
     pub fn is_healthy(&self) -> bool {
         self.healthy.load(Ordering::Acquire) && !self.draining.load(Ordering::Acquire)
+    }
+
+    pub fn set_healthy(&self, healthy: bool) {
+        self.healthy.store(healthy, Ordering::Release);
+        if healthy {
+            self.healthy_since_millis
+                .store(now_millis(), Ordering::Release);
+        }
     }
 
     pub fn is_available(&self) -> bool {
@@ -72,27 +90,58 @@ impl Backend {
         self.active_connections.load(Ordering::Relaxed)
     }
 
+    pub fn record_latency(&self, latency: Duration) {
+        let sample = latency.as_micros() as u64;
+        let mut current = self.ewma_latency_micros.load(Ordering::Relaxed);
+        loop {
+            let next = if current == 0 {
+                sample
+            } else {
+                // EWMA with alpha = 0.2: new = 0.2 * sample + 0.8 * current
+                (sample * 2 + current * 8) / 10
+            };
+            match self.ewma_latency_micros.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    pub fn ewma_latency(&self) -> Duration {
+        Duration::from_micros(self.ewma_latency_micros.load(Ordering::Relaxed))
+    }
+
+    pub fn ewma_latency_ms(&self) -> f64 {
+        self.ewma_latency_micros.load(Ordering::Relaxed) as f64 / 1000.0
+    }
+
     pub fn effective_weight(&self, slow_start_duration: Duration) -> u32 {
-        if self.weight == 0 {
+        let base_weight = self.weight();
+        if base_weight == 0 {
             return 0;
         }
         if slow_start_duration.is_zero() {
-            return self.weight;
+            return base_weight;
         }
 
         let healthy_since = self.healthy_since_millis.load(Ordering::Acquire);
         if healthy_since == 0 {
-            return self.weight;
+            return base_weight;
         }
 
         let elapsed = now_millis().saturating_sub(healthy_since);
         let total_ms = slow_start_duration.as_millis() as u64;
         if elapsed >= total_ms || total_ms == 0 {
-            self.weight
+            base_weight
         } else {
             let progress = elapsed as f64 / total_ms as f64;
-            let ramped = (self.weight as f64 * progress).round() as u32;
-            ramped.max(1).min(self.weight)
+            let ramped = (base_weight as f64 * progress).round() as u32;
+            ramped.max(1).min(base_weight)
         }
     }
 

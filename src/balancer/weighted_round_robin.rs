@@ -20,10 +20,11 @@ impl WeightedRoundRobin {
 }
 
 impl LoadBalancer for WeightedRoundRobin {
-    fn select_excluding(
+    fn select_with_key(
         &self,
         backends: &[Arc<Backend>],
         excluded: &[SocketAddr],
+        _key: Option<&str>,
     ) -> Option<Arc<Backend>> {
         if backends.is_empty() || backends.len() != self.current_weights.len() {
             return None;

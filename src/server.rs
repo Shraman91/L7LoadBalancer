@@ -1,5 +1,5 @@
 use crate::proxy;
-use crate::state::AppState;
+use crate::state::{AppState, AppStateHolder};
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as ConnBuilder;
@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 pub async fn run(
     listen_addr: SocketAddr,
-    state: Arc<AppState>,
+    state_holder: Arc<AppStateHolder>,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(listen_addr).await?;
@@ -34,14 +34,15 @@ pub async fn run(
                 };
 
                 let io = TokioIo::new(stream);
-                let state = Arc::clone(&state);
+                let state_holder = Arc::clone(&state_holder);
+                let current_state = state_holder.load();
                 let header_read_timeout = Duration::from_secs(
-                    state.config.timeouts.client_header_read_secs.max(1),
+                    current_state.config.timeouts.client_header_read_secs.max(1),
                 );
 
                 tokio::spawn(async move {
                     let service = service_fn(move |req| {
-                        let state = Arc::clone(&state);
+                        let state = state_holder.load();
                         async move { proxy::handle(state, client_addr, req).await }
                     });
 
@@ -57,7 +58,8 @@ pub async fn run(
     }
 
     // Graceful drain
-    let drain_secs = state.config.shutdown.drain_timeout_secs;
+    let current_state = state_holder.load();
+    let drain_secs = current_state.config.shutdown.drain_timeout_secs;
     tracing::info!(
         drain_timeout_secs = drain_secs,
         "draining in-flight requests"
@@ -66,10 +68,10 @@ pub async fn run(
     let start_drain = Instant::now();
     let timeout = Duration::from_secs(drain_secs);
 
-    while state.in_flight_requests.load(Ordering::Relaxed) > 0 {
+    while current_state.in_flight_requests.load(Ordering::Relaxed) > 0 {
         if start_drain.elapsed() >= timeout {
             tracing::warn!(
-                remaining = state.in_flight_requests.load(Ordering::Relaxed),
+                remaining = current_state.in_flight_requests.load(Ordering::Relaxed),
                 "drain deadline reached, forcing shutdown"
             );
             break;
@@ -79,4 +81,17 @@ pub async fn run(
 
     tracing::info!("graceful shutdown complete");
     Ok(())
+}
+
+pub async fn run_with_state(
+    listen_addr: SocketAddr,
+    state: Arc<AppState>,
+    cancel_token: CancellationToken,
+) -> anyhow::Result<()> {
+    let holder = Arc::new(AppStateHolder {
+        inner: arc_swap::ArcSwap::new(state),
+        config_path: std::path::PathBuf::from("config.toml"),
+        health_cancel: std::sync::Mutex::new(None),
+    });
+    run(listen_addr, holder, cancel_token).await
 }

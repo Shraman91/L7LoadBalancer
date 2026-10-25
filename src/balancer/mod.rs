@@ -1,8 +1,14 @@
+mod consistent_hash;
 mod least_connections;
+mod least_response_time;
+mod power_of_two;
 mod round_robin;
 mod weighted_round_robin;
 
+pub use consistent_hash::ConsistentHash;
 pub use least_connections::LeastConnections;
+pub use least_response_time::LeastResponseTime;
+pub use power_of_two::PowerOfTwoChoices;
 pub use round_robin::RoundRobin;
 pub use weighted_round_robin::WeightedRoundRobin;
 
@@ -19,5 +25,14 @@ pub trait LoadBalancer: Send + Sync {
         &self,
         backends: &[Arc<Backend>],
         excluded: &[SocketAddr],
+    ) -> Option<Arc<Backend>> {
+        self.select_with_key(backends, excluded, None)
+    }
+
+    fn select_with_key(
+        &self,
+        backends: &[Arc<Backend>],
+        excluded: &[SocketAddr],
+        key: Option<&str>,
     ) -> Option<Arc<Backend>>;
 }

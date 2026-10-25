@@ -35,7 +35,6 @@ pub fn is_idempotent_method(method: &Method) -> bool {
 
 #[derive(Debug)]
 pub struct RetryBudget {
-    // Atomic tokens scaled by 1000 to allow fractional accumulation without floating point in atomics
     tokens: AtomicI64,
     total_requests: AtomicU64,
     total_retries: AtomicU64,

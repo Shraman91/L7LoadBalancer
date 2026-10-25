@@ -23,10 +23,11 @@ impl Default for RoundRobin {
 }
 
 impl LoadBalancer for RoundRobin {
-    fn select_excluding(
+    fn select_with_key(
         &self,
         backends: &[Arc<Backend>],
         excluded: &[SocketAddr],
+        _key: Option<&str>,
     ) -> Option<Arc<Backend>> {
         let len = backends.len();
         if len == 0 {

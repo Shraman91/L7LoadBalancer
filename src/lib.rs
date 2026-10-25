@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod backend;
 pub mod balancer;
 pub mod circuit_breaker;
@@ -6,5 +7,6 @@ pub mod error;
 pub mod health;
 pub mod proxy;
 pub mod retry;
+pub mod router;
 pub mod server;
 pub mod state;

@@ -1,12 +1,13 @@
 use crate::circuit_breaker::CircuitBreakerConfig as CbRuntimeConfig;
 use crate::retry::RetryConfig as RetryRuntimeConfig;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct BackendConfig {
     pub addr: String,
     #[serde(default = "default_weight")]
@@ -17,7 +18,7 @@ fn default_weight() -> u32 {
     1
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct HealthCheckConfig {
     #[serde(default = "default_health_path")]
     pub path: String,
@@ -59,7 +60,7 @@ fn default_healthy_threshold() -> u32 {
     2
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct TimeoutsConfig {
     #[serde(default = "default_connect_timeout")]
     pub connect_secs: u64,
@@ -101,7 +102,7 @@ fn default_request_timeout() -> u64 {
     30
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct LimitsConfig {
     #[serde(default = "default_max_request_header_size")]
     pub max_request_header_size_bytes: usize,
@@ -125,7 +126,7 @@ fn default_max_body_size() -> usize {
     0 // unlimited by default
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct CircuitBreakerTomlConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -179,7 +180,7 @@ impl CircuitBreakerTomlConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct RetryTomlConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -237,7 +238,7 @@ impl RetryTomlConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct PassiveHealthCheckConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -258,7 +259,7 @@ fn default_passive_unhealthy_threshold() -> u32 {
     3
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct SlowStartConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -279,7 +280,7 @@ fn default_slow_start_window() -> u64 {
     30
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct ShutdownConfig {
     #[serde(default = "default_drain_timeout")]
     pub drain_timeout_secs: u64,
@@ -297,21 +298,103 @@ fn default_drain_timeout() -> u64 {
     30
 }
 
-#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Algorithm {
     RoundRobin,
     WeightedRoundRobin,
     LeastConnections,
+    PowerOfTwoChoices,
+    ConsistentHash,
+    LeastResponseTime,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+fn default_algorithm() -> Algorithm {
+    Algorithm::RoundRobin
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+pub struct PoolConfig {
+    #[serde(default = "default_algorithm")]
+    pub algorithm: Algorithm,
+    #[serde(default)]
+    pub hash_key: Option<String>,
+    #[serde(default)]
+    pub health_check: Option<HealthCheckConfig>,
+    #[serde(default)]
+    pub backends: Vec<BackendConfig>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+pub struct RouteRuleConfig {
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default = "default_root_path")]
+    pub path_prefix: String,
+    pub pool: String,
+    #[serde(default)]
+    pub strip_prefix: Option<bool>,
+    #[serde(default)]
+    pub rewrite_prefix: Option<String>,
+}
+
+fn default_root_path() -> String {
+    "/".to_string()
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+pub struct AdminConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_admin_addr")]
+    pub addr: String,
+}
+
+impl Default for AdminConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            addr: default_admin_addr(),
+        }
+    }
+}
+
+fn default_admin_addr() -> String {
+    "127.0.0.1:8081".to_string()
+}
+
+fn default_listen_addr() -> String {
+    "0.0.0.0:8080".to_string()
+}
+
+fn default_pool_name() -> String {
+    "default".to_string()
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct Config {
+    #[serde(default = "default_listen_addr")]
     pub listen_addr: String,
+
+    // Legacy / top-level pool settings (for backward-compatibility)
+    #[serde(default = "default_algorithm")]
     pub algorithm: Algorithm,
     #[serde(default)]
     pub health_check: HealthCheckConfig,
+    #[serde(default)]
     pub backends: Vec<BackendConfig>,
+
+    // Multi-pool and routing
+    #[serde(default = "default_pool_name")]
+    pub default_pool: String,
+    #[serde(default)]
+    pub pools: HashMap<String, PoolConfig>,
+    #[serde(default)]
+    pub routes: Vec<RouteRuleConfig>,
+
+    // Admin API
+    #[serde(default)]
+    pub admin: AdminConfig,
 
     #[serde(default)]
     pub timeouts: TimeoutsConfig,
@@ -332,14 +415,90 @@ pub struct Config {
 impl Config {
     pub fn load(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let raw = fs::read_to_string(path)?;
-        let cfg: Config = toml::from_str(&raw)?;
-        if cfg.backends.is_empty() {
-            anyhow::bail!("config must define at least one backend");
-        }
+        let mut cfg: Config = toml::from_str(&raw)?;
+        cfg.validate()?;
         Ok(cfg)
+    }
+
+    pub fn validate(&mut self) -> anyhow::Result<()> {
+        let _: SocketAddr = self
+            .listen_addr
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid listen_addr {}: {}", self.listen_addr, e))?;
+
+        if self.admin.enabled {
+            let _: SocketAddr =
+                self.admin.addr.parse().map_err(|e| {
+                    anyhow::anyhow!("invalid admin addr {}: {}", self.admin.addr, e)
+                })?;
+        }
+
+        let effective = self.effective_pools();
+        if effective.is_empty() {
+            anyhow::bail!("config must define at least one backend pool");
+        }
+
+        if !effective.contains_key(&self.default_pool) {
+            if self.default_pool == "default" && effective.len() == 1 {
+                self.default_pool = effective.keys().next().unwrap().clone();
+            } else {
+                anyhow::bail!(
+                    "default_pool '{}' does not match any configured pool",
+                    self.default_pool
+                );
+            }
+        }
+
+        for (name, pool) in &effective {
+            if pool.backends.is_empty() {
+                anyhow::bail!("pool '{}' must define at least one backend", name);
+            }
+            for b in &pool.backends {
+                let _: SocketAddr = b.addr.parse().map_err(|e| {
+                    anyhow::anyhow!("pool '{}' invalid backend addr {}: {}", name, b.addr, e)
+                })?;
+            }
+        }
+
+        for (idx, route) in self.routes.iter().enumerate() {
+            if !effective.contains_key(&route.pool) {
+                anyhow::bail!("route #{} targets unknown pool '{}'", idx, route.pool);
+            }
+            if !route.path_prefix.starts_with('/') {
+                anyhow::bail!(
+                    "route #{} path_prefix '{}' must start with '/'",
+                    idx,
+                    route.path_prefix
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn effective_pools(&self) -> HashMap<String, PoolConfig> {
+        if !self.pools.is_empty() {
+            self.pools.clone()
+        } else {
+            let mut pools = HashMap::new();
+            pools.insert(
+                "default".to_string(),
+                PoolConfig {
+                    algorithm: self.algorithm,
+                    hash_key: None,
+                    health_check: Some(self.health_check.clone()),
+                    backends: self.backends.clone(),
+                },
+            );
+            pools
+        }
     }
 
     pub fn listen_socket_addr(&self) -> anyhow::Result<SocketAddr> {
         Ok(self.listen_addr.parse()?)
+    }
+
+    pub fn admin_socket_addr(&self) -> anyhow::Result<SocketAddr> {
+        Ok(self.admin.addr.parse()?)
     }
 }

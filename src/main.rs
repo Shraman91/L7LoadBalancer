@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod backend;
 pub mod balancer;
 pub mod circuit_breaker;
@@ -6,14 +7,14 @@ pub mod error;
 pub mod health;
 pub mod proxy;
 pub mod retry;
+pub mod router;
 pub mod server;
 pub mod state;
 
-use crate::backend::Backend;
-use crate::balancer::{LeastConnections, LoadBalancer, RoundRobin, WeightedRoundRobin};
-use crate::config::{Algorithm, Config};
-use crate::state::AppState;
+use crate::config::Config;
+use crate::state::AppStateHolder;
 use clap::Parser;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -37,40 +38,29 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config::load(&args.config)?;
     let listen_addr = cfg.listen_socket_addr()?;
 
-    let cb_runtime_cfg = cfg.circuit_breaker.to_runtime();
-    let backends: Vec<Arc<Backend>> = cfg
-        .backends
-        .iter()
-        .map(|b| -> anyhow::Result<Arc<Backend>> {
-            let addr = b.addr.parse()?;
-            Ok(Arc::new(Backend::new(
-                addr,
-                b.weight,
-                cb_runtime_cfg.clone(),
-            )))
-        })
-        .collect::<anyhow::Result<_>>()?;
+    let (state_holder, health_cancel) =
+        AppStateHolder::new(cfg.clone(), PathBuf::from(&args.config));
 
-    tracing::info!(count = backends.len(), algorithm = ?cfg.algorithm, "loaded backends");
+    let initial_state = state_holder.load();
+    tracing::info!(
+        pools = initial_state.pools.len(),
+        backends = initial_state.backends.len(),
+        routes = initial_state.router.routes.len(),
+        "loaded initial configuration"
+    );
 
-    let slow_start_duration = Duration::from_secs(if cfg.slow_start.enabled {
-        cfg.slow_start.window_secs
-    } else {
-        0
-    });
+    for pool in initial_state.pools.values() {
+        health::spawn_health_checks(
+            pool.backends.clone(),
+            pool.health_check.clone(),
+            health_cancel.clone(),
+        );
+    }
 
-    let balancer: Box<dyn LoadBalancer> = match cfg.algorithm {
-        Algorithm::RoundRobin => Box::new(RoundRobin::new()),
-        Algorithm::LeastConnections => Box::new(LeastConnections::new()),
-        Algorithm::WeightedRoundRobin => {
-            Box::new(WeightedRoundRobin::new(&backends, slow_start_duration))
-        }
-    };
-
-    let cancel_token = CancellationToken::new();
+    let shutdown_cancel = CancellationToken::new();
 
     // Spawn signal listener for SIGINT / SIGTERM
-    let cancel_for_signal = cancel_token.clone();
+    let cancel_for_signal = shutdown_cancel.clone();
     tokio::spawn(async move {
         #[cfg(unix)]
         {
@@ -104,13 +94,81 @@ async fn main() -> anyhow::Result<()> {
         cancel_for_signal.cancel();
     });
 
-    health::spawn_health_checks(
-        backends.clone(),
-        cfg.health_check.clone(),
-        cancel_token.clone(),
-    );
+    // Spawn SIGHUP listener on Unix
+    #[cfg(unix)]
+    {
+        let holder = Arc::clone(&state_holder);
+        let cancel = shutdown_cancel.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            if let Ok(mut sighup) = signal(SignalKind::hangup()) {
+                loop {
+                    tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        _ = sighup.recv() => {
+                            tracing::info!("received SIGHUP, initiating hot reload");
+                            if let Err(e) = holder.reload() {
+                                tracing::error!(error = %e, "SIGHUP reload failed");
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
 
-    let state = Arc::new(AppState::new(backends, balancer, cfg));
+    // Spawn file watcher for config hot reload
+    let watcher_holder = Arc::clone(&state_holder);
+    let watcher_cancel = shutdown_cancel.clone();
+    let config_path = PathBuf::from(&args.config);
+    tokio::task::spawn_blocking(move || {
+        use notify::{
+            Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut watcher = match RecommendedWatcher::new(tx, NotifyConfig::default()) {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::warn!(error = %e, "file watcher could not be created");
+                return;
+            }
+        };
 
-    server::run(listen_addr, state, cancel_token).await
+        if let Err(e) = watcher.watch(&config_path, RecursiveMode::NonRecursive) {
+            tracing::warn!(error = %e, path = ?config_path, "failed to watch config file");
+            return;
+        }
+
+        while !watcher_cancel.is_cancelled() {
+            match rx.recv_timeout(Duration::from_millis(500)) {
+                Ok(Ok(event)) => {
+                    if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
+                        std::thread::sleep(Duration::from_millis(50));
+                        if let Err(e) = watcher_holder.reload() {
+                            tracing::error!(error = %e, "file watcher reload failed");
+                        }
+                    }
+                }
+                Ok(Err(e)) => {
+                    tracing::debug!(error = %e, "file watcher notification error");
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    });
+
+    // Spawn Admin API server
+    if cfg.admin.enabled {
+        let admin_addr = cfg.admin_socket_addr()?;
+        let admin_holder = Arc::clone(&state_holder);
+        let admin_cancel = shutdown_cancel.clone();
+        tokio::spawn(async move {
+            if let Err(e) = admin::run_admin_server(admin_addr, admin_holder, admin_cancel).await {
+                tracing::error!(error = %e, "admin server stopped with error");
+            }
+        });
+    }
+
+    server::run(listen_addr, state_holder, shutdown_cancel).await
 }
