@@ -318,6 +318,31 @@ impl Default for ShutdownConfig {
     }
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+pub struct AccessLogConfig {
+    #[serde(default = "default_access_log_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_access_log_format")]
+    pub format: String,
+}
+
+impl Default for AccessLogConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            format: default_access_log_format(),
+        }
+    }
+}
+
+fn default_access_log_enabled() -> bool {
+    true
+}
+
+fn default_access_log_format() -> String {
+    "json".to_string()
+}
+
 fn default_drain_timeout() -> u64 {
     30
 }
@@ -511,6 +536,8 @@ pub struct Config {
     pub slow_start: SlowStartConfig,
     #[serde(default)]
     pub shutdown: ShutdownConfig,
+    #[serde(default)]
+    pub access_log: AccessLogConfig,
 }
 
 impl Config {

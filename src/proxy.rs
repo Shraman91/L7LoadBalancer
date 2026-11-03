@@ -158,11 +158,92 @@ impl Drop for InFlightGuard {
     }
 }
 
+struct AccessLogParams<'a> {
+    request_id: &'a str,
+    client_addr: SocketAddr,
+    method: &'a hyper::Method,
+    path: &'a str,
+    status: StatusCode,
+    pool: &'a str,
+    backend: Option<SocketAddr>,
+    latency: Duration,
+    retries: usize,
+}
+
+fn log_access(state: &AppState, p: AccessLogParams<'_>) {
+    if !state.config.access_log.enabled {
+        return;
+    }
+
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+
+    let backend_str = p
+        .backend
+        .map(|b| b.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let latency_ms = p.latency.as_secs_f64() * 1000.0;
+
+    if state.config.access_log.format == "json" {
+        let entry = serde_json::json!({
+            "timestamp": timestamp,
+            "request_id": p.request_id,
+            "client_ip": p.client_addr.ip().to_string(),
+            "method": p.method.as_str(),
+            "path": p.path,
+            "status": p.status.as_u16(),
+            "pool": p.pool,
+            "backend": backend_str,
+            "latency_ms": (latency_ms * 100.0).round() / 100.0,
+            "retries": p.retries,
+        });
+        tracing::info!(target: "access_log", "{}", entry);
+    } else {
+        tracing::info!(
+            target: "access_log",
+            "{} [{}] {} {} {} pool={} backend={} latency_ms={:.2} retries={}",
+            p.client_addr.ip(),
+            p.request_id,
+            p.method,
+            p.path,
+            p.status.as_u16(),
+            p.pool,
+            backend_str,
+            latency_ms,
+            p.retries
+        );
+    }
+}
+
 pub async fn handle(
     state: Arc<AppState>,
     client_addr: SocketAddr,
     req: Request<Incoming>,
 ) -> Result<Response<BoxedBody>, hyper::Error> {
+    let start_time = Instant::now();
+    let method = req.method().clone();
+    let raw_path_and_query = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/")
+        .to_string();
+
+    let request_id = req
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            format!(
+                "{:016x}{:016x}",
+                rand::random::<u64>(),
+                rand::random::<u64>()
+            )
+        });
+
     // 1. Global concurrency limit with load shedding (503)
     let max_conn = state.config.limits.max_concurrent_connections;
     if max_conn > 0 {
@@ -170,16 +251,48 @@ pub async fn handle(
         loop {
             if current >= max_conn {
                 state.load_shed_count.fetch_add(1, Ordering::Relaxed);
+                state.metrics.load_shed_requests_total.inc();
+                state
+                    .metrics
+                    .http_requests_total
+                    .with_label_values(&["503", "none"])
+                    .inc();
+                state
+                    .metrics
+                    .http_request_duration_seconds
+                    .with_label_values(&["503", "none"])
+                    .observe(start_time.elapsed().as_secs_f64());
+
+                log_access(
+                    &state,
+                    AccessLogParams {
+                        request_id: &request_id,
+                        client_addr,
+                        method: &method,
+                        path: &raw_path_and_query,
+                        status: StatusCode::SERVICE_UNAVAILABLE,
+                        pool: "none",
+                        backend: None,
+                        latency: start_time.elapsed(),
+                        retries: 0,
+                    },
+                );
+
                 tracing::warn!(
                     client = %client_addr,
                     current,
                     max_conn,
                     "load shedding: global concurrency limit reached"
                 );
-                return Ok(error_response(
+                let mut resp = error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "503 Service Unavailable: Server Overloaded\n",
-                ));
+                );
+                if let Ok(hv) = HeaderValue::from_str(&request_id) {
+                    resp.headers_mut()
+                        .insert(HeaderName::from_static("x-request-id"), hv);
+                }
+                return Ok(resp);
             }
             match state.in_flight_requests.compare_exchange_weak(
                 current,
@@ -202,30 +315,112 @@ pub async fn handle(
     if let Some(ref limiter) = state.rate_limiter {
         if let Err(retry_after) = limiter.check(client_addr.ip()) {
             state.rate_limited_count.fetch_add(1, Ordering::Relaxed);
+            state.metrics.rate_limited_requests_total.inc();
+            state
+                .metrics
+                .http_requests_total
+                .with_label_values(&["429", "none"])
+                .inc();
+            state
+                .metrics
+                .http_request_duration_seconds
+                .with_label_values(&["429", "none"])
+                .observe(start_time.elapsed().as_secs_f64());
+
+            log_access(
+                &state,
+                AccessLogParams {
+                    request_id: &request_id,
+                    client_addr,
+                    method: &method,
+                    path: &raw_path_and_query,
+                    status: StatusCode::TOO_MANY_REQUESTS,
+                    pool: "none",
+                    backend: None,
+                    latency: start_time.elapsed(),
+                    retries: 0,
+                },
+            );
+
             tracing::warn!(client = %client_addr, retry_after, "rate limit exceeded");
-            return Ok(Response::builder()
+            let mut resp = Response::builder()
                 .status(StatusCode::TOO_MANY_REQUESTS)
                 .header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
                 .header(hyper::header::RETRY_AFTER, retry_after.to_string())
                 .body(full_body("429 Too Many Requests\n"))
-                .unwrap());
+                .unwrap();
+            if let Ok(hv) = HeaderValue::from_str(&request_id) {
+                resp.headers_mut()
+                    .insert(HeaderName::from_static("x-request-id"), hv);
+            }
+            return Ok(resp);
         }
     }
 
-    handle_inner(state.clone(), client_addr, req).await
+    let (mut resp, pool_name, backend_addr, retries) =
+        handle_inner(state.clone(), client_addr, req, &request_id).await?;
+
+    let elapsed = start_time.elapsed();
+    let status = resp.status();
+
+    state
+        .metrics
+        .http_requests_total
+        .with_label_values(&[status.as_str(), &pool_name])
+        .inc();
+    state
+        .metrics
+        .http_request_duration_seconds
+        .with_label_values(&[status.as_str(), &pool_name])
+        .observe(elapsed.as_secs_f64());
+    if retries > 0 {
+        state
+            .metrics
+            .http_retries_total
+            .with_label_values(&[&pool_name])
+            .inc_by(retries as f64);
+    }
+
+    log_access(
+        &state,
+        AccessLogParams {
+            request_id: &request_id,
+            client_addr,
+            method: &method,
+            path: &raw_path_and_query,
+            status,
+            pool: &pool_name,
+            backend: backend_addr,
+            latency: elapsed,
+            retries,
+        },
+    );
+
+    if let Ok(hv) = HeaderValue::from_str(&request_id) {
+        resp.headers_mut()
+            .insert(HeaderName::from_static("x-request-id"), hv);
+    }
+
+    Ok(resp)
 }
 
 async fn handle_inner(
     state: Arc<AppState>,
     client_addr: SocketAddr,
     mut req: Request<Incoming>,
-) -> Result<Response<BoxedBody>, hyper::Error> {
+    request_id: &str,
+) -> Result<(Response<BoxedBody>, String, Option<SocketAddr>, usize), hyper::Error> {
     // 1. Check max header size limit
     if headers_byte_size(req.headers()) > state.config.limits.max_request_header_size_bytes {
         tracing::warn!(client = %client_addr, "request header size exceeded limit");
-        return Ok(error_response(
-            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
-            "431 Request Header Fields Too Large\n",
+        return Ok((
+            error_response(
+                StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+                "431 Request Header Fields Too Large\n",
+            ),
+            "none".to_string(),
+            None,
+            0,
         ));
     }
 
@@ -236,9 +431,14 @@ async fn handle_inner(
                 if let Ok(len) = cl_str.parse::<usize>() {
                     if len > state.config.limits.max_body_size_bytes {
                         tracing::warn!(client = %client_addr, len, "request payload size exceeded limit");
-                        return Ok(error_response(
-                            StatusCode::PAYLOAD_TOO_LARGE,
-                            "413 Payload Too Large\n",
+                        return Ok((
+                            error_response(
+                                StatusCode::PAYLOAD_TOO_LARGE,
+                                "413 Payload Too Large\n",
+                            ),
+                            "none".to_string(),
+                            None,
+                            0,
                         ));
                     }
                 }
@@ -339,15 +539,25 @@ async fn handle_inner(
             None => {
                 if excluded_backends.is_empty() {
                     tracing::warn!(pool = %pool.name, "no healthy backends available");
-                    return Ok(error_response(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "503 Service Unavailable: No healthy backends\n",
+                    return Ok((
+                        error_response(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "503 Service Unavailable: No healthy backends\n",
+                        ),
+                        pool.name.clone(),
+                        None,
+                        attempt - 1,
                     ));
                 } else {
                     tracing::warn!(pool = %pool.name, "no additional healthy backends available for retry");
-                    return Ok(error_response(
-                        StatusCode::BAD_GATEWAY,
-                        "502 Bad Gateway: Upstream request failed\n",
+                    return Ok((
+                        error_response(
+                            StatusCode::BAD_GATEWAY,
+                            "502 Bad Gateway: Upstream request failed\n",
+                        ),
+                        pool.name.clone(),
+                        None,
+                        attempt - 1,
                     ));
                 }
             }
@@ -368,15 +578,23 @@ async fn handle_inner(
             Ok(u) => u,
             Err(e) => {
                 tracing::error!(error = %e, uri = %new_uri_str, "failed to build upstream uri");
-                return Ok(error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "500 Internal Server Error: Bad upstream URI\n",
+                return Ok((
+                    error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "500 Internal Server Error: Bad upstream URI\n",
+                    ),
+                    pool.name.clone(),
+                    Some(backend.addr),
+                    attempt - 1,
                 ));
             }
         };
 
         let mut headers = original_headers.clone();
         sanitize_request_headers_with_tls(&mut headers, client_addr, is_upgrade, is_client_tls);
+        if let Ok(hv) = HeaderValue::from_str(request_id) {
+            headers.insert(HeaderName::from_static("x-request-id"), hv);
+        }
 
         let mut builder = Request::builder().method(method.clone()).uri(new_uri);
         for (k, v) in headers.iter() {
@@ -395,9 +613,14 @@ async fn handle_inner(
             Ok(r) => r,
             Err(e) => {
                 tracing::error!(error = %e, "failed to build upstream request");
-                return Ok(error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "500 Internal Server Error\n",
+                return Ok((
+                    error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "500 Internal Server Error\n",
+                    ),
+                    pool.name.clone(),
+                    Some(backend.addr),
+                    attempt - 1,
                 ));
             }
         };
@@ -489,7 +712,12 @@ async fn handle_inner(
                     is_upgrade && status == StatusCode::SWITCHING_PROTOCOLS,
                 );
                 let boxed = body.map_err(|e| e).boxed();
-                return Ok(Response::from_parts(parts, boxed));
+                return Ok((
+                    Response::from_parts(parts, boxed),
+                    pool.name.clone(),
+                    Some(backend.addr),
+                    attempt - 1,
+                ));
             }
             Ok(Err(e)) => {
                 tracing::warn!(backend = %backend.addr, error = %e, attempt, "upstream connect/io error");
@@ -511,9 +739,14 @@ async fn handle_inner(
                     continue;
                 }
 
-                return Ok(error_response(
-                    StatusCode::BAD_GATEWAY,
-                    "502 Bad Gateway: Upstream connection failed\n",
+                return Ok((
+                    error_response(
+                        StatusCode::BAD_GATEWAY,
+                        "502 Bad Gateway: Upstream connection failed\n",
+                    ),
+                    pool.name.clone(),
+                    Some(backend.addr),
+                    attempt - 1,
                 ));
             }
             Err(_) => {
@@ -536,9 +769,14 @@ async fn handle_inner(
                     continue;
                 }
 
-                return Ok(error_response(
-                    StatusCode::GATEWAY_TIMEOUT,
-                    "504 Gateway Timeout: Upstream response timed out\n",
+                return Ok((
+                    error_response(
+                        StatusCode::GATEWAY_TIMEOUT,
+                        "504 Gateway Timeout: Upstream response timed out\n",
+                    ),
+                    pool.name.clone(),
+                    Some(backend.addr),
+                    attempt - 1,
                 ));
             }
         }

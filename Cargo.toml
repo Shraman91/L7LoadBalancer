@@ -37,6 +37,7 @@ rustls-pki-types = "1.0"
 hyper-rustls = { version = "0.27", default-features = false, features = ["ring", "http1", "http2", "tls12", "webpki-roots"] }
 webpki-roots = "1.0"
 parking_lot = "0.12"
+prometheus = { version = "0.13", default-features = false }
 
 [profile.dev]
 incremental = false

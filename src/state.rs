@@ -70,6 +70,7 @@ pub struct AppState {
     pub rate_limiter: Option<Arc<RateLimiter>>,
     pub load_shed_count: Arc<AtomicUsize>,
     pub rate_limited_count: Arc<AtomicUsize>,
+    pub metrics: Arc<crate::metrics::Metrics>,
 }
 
 fn create_balancer(
@@ -168,6 +169,7 @@ impl AppState {
             rate_limiter,
             load_shed_count: Arc::new(AtomicUsize::new(0)),
             rate_limited_count: Arc::new(AtomicUsize::new(0)),
+            metrics: Arc::new(crate::metrics::Metrics::new().expect("valid metrics")),
         }
     }
 
@@ -300,6 +302,7 @@ impl AppState {
             rate_limiter,
             load_shed_count: Arc::new(AtomicUsize::new(0)),
             rate_limited_count: Arc::new(AtomicUsize::new(0)),
+            metrics: Arc::new(crate::metrics::Metrics::new().expect("valid metrics")),
         })
     }
 

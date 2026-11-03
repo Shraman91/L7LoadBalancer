@@ -119,6 +119,17 @@ pub async fn handle_admin_request<B>(
             json_response(StatusCode::OK, &list)
         }
         (&Method::GET, "/admin/config") => json_response(StatusCode::OK, &state.config),
+        (&Method::GET, "/metrics") => {
+            let body = state.metrics.gather(&state);
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(
+                    hyper::header::CONTENT_TYPE,
+                    "text/plain; version=0.0.4; charset=utf-8",
+                )
+                .body(full_body(body))
+                .unwrap()
+        }
         (&Method::POST, p) if p.starts_with("/admin/backends/") && p.ends_with("/drain") => {
             let prefix = "/admin/backends/";
             let suffix = "/drain";

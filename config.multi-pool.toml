@@ -31,6 +31,11 @@ burst = 50
 max_entries = 100000
 cleanup_interval_secs = 60
 
+# Structured access logging
+[access_log]
+enabled = true
+format = "json" # "json" or "text"
+
 [retry]
 enabled = true
 max_attempts = 3
