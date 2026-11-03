@@ -600,9 +600,23 @@ impl Config {
                 anyhow::bail!("pool '{}' must define at least one backend", name);
             }
             for b in &pool.backends {
-                let _: SocketAddr = b.addr.parse().map_err(|e| {
-                    anyhow::anyhow!("pool '{}' invalid backend addr {}: {}", name, b.addr, e)
-                })?;
+                if b.addr.parse::<SocketAddr>().is_err() {
+                    if let Some((host, port_str)) = b.addr.rsplit_once(':') {
+                        if host.is_empty() || port_str.parse::<u16>().is_err() {
+                            anyhow::bail!(
+                                "pool '{}' invalid backend addr '{}': expected host:port",
+                                name,
+                                b.addr
+                            );
+                        }
+                    } else {
+                        anyhow::bail!(
+                            "pool '{}' invalid backend addr '{}': missing port",
+                            name,
+                            b.addr
+                        );
+                    }
+                }
             }
         }
 

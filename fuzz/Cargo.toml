@@ -1,0 +1,26 @@
+[package]
+name = "l7-load-balancer-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+l7-load-balancer = { path = ".." }
+hyper = { version = "1.5", features = ["full"] }
+
+[[bin]]
+name = "fuzz_config_parser"
+path = "fuzz_targets/fuzz_config_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_header_sanitization"
+path = "fuzz_targets/fuzz_header_sanitization.rs"
+test = false
+doc = false
+

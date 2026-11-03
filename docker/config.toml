@@ -1,0 +1,80 @@
+listen_addr = "0.0.0.0:8080"
+default_pool = "web"
+
+[admin]
+enabled = true
+addr = "0.0.0.0:8081"
+
+[timeouts]
+connect_secs = 3
+upstream_response_header_secs = 5
+client_header_read_secs = 5
+idle_keepalive_secs = 60
+
+[limits]
+max_request_header_size_bytes = 16384
+max_body_size_bytes = 10485760
+max_concurrent_connections = 1000
+
+[rate_limit]
+enabled = true
+requests_per_second = 100.0
+burst = 150
+max_entries = 10000
+cleanup_interval_secs = 30
+
+[circuit_breaker]
+failure_threshold = 3
+cooldown_secs = 10
+half_open_max_trials = 2
+half_open_successes_to_close = 2
+
+[retry]
+enabled = true
+max_attempts = 3
+initial_backoff_ms = 100
+max_backoff_ms = 1000
+budget_ratio = 0.20
+min_retry_tokens = 10
+
+[passive_health_check]
+enabled = true
+unhealthy_threshold = 3
+
+[slow_start]
+enabled = true
+window_secs = 15
+
+[shutdown]
+drain_timeout_secs = 10
+
+[access_log]
+enabled = true
+format = "json"
+
+[pools.web]
+algorithm = "round_robin"
+
+[pools.web.health_check]
+path = "/health"
+interval_secs = 3
+timeout_secs = 2
+unhealthy_threshold = 2
+healthy_threshold = 2
+
+[[pools.web.backends]]
+addr = "backend1:9001"
+weight = 3
+
+[[pools.web.backends]]
+addr = "backend2:9002"
+weight = 2
+
+[[pools.web.backends]]
+addr = "backend3:9003"
+weight = 1
+
+[[routes]]
+path_prefix = "/"
+pool = "web"
+

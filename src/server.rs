@@ -70,12 +70,12 @@ pub async fn run(
                             }
                         };
                         let io = TokioIo::new(tls_stream);
-                        if let Err(e) = builder.serve_connection(io, service).await {
+                        if let Err(e) = builder.serve_connection_with_upgrades(io, service).await {
                             tracing::debug!(error = %e, client = %client_addr, "TLS connection closed with error");
                         }
                     } else {
                         let io = TokioIo::new(stream);
-                        if let Err(e) = builder.serve_connection(io, service).await {
+                        if let Err(e) = builder.serve_connection_with_upgrades(io, service).await {
                             tracing::debug!(error = %e, client = %client_addr, "connection closed with error");
                         }
                     }

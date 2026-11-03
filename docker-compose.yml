@@ -1,0 +1,74 @@
+version: "3.8"
+
+services:
+  backend1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["9001"]
+    entrypoint: ["/usr/local/bin/mock_backend"]
+    expose:
+      - "9001"
+    restart: unless-stopped
+
+  backend2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["9002"]
+    entrypoint: ["/usr/local/bin/mock_backend"]
+    expose:
+      - "9002"
+    restart: unless-stopped
+
+  backend3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["9003"]
+    entrypoint: ["/usr/local/bin/mock_backend"]
+    expose:
+      - "9003"
+    restart: unless-stopped
+
+  l7lb:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - backend1
+      - backend2
+      - backend3
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    volumes:
+      - ./docker/config.toml:/app/config.toml:ro
+    command: ["--config", "/app/config.toml"]
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - l7lb
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.0.0
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./docker/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./docker/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./docs/grafana-dashboard.json:/etc/grafana/dashboards/grafana-dashboard.json:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+

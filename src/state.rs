@@ -203,7 +203,15 @@ impl AppState {
         for (name, pool_cfg) in &effective {
             let mut pool_backends = Vec::new();
             for b_cfg in &pool_cfg.backends {
-                if let Ok(addr) = b_cfg.addr.parse::<SocketAddr>() {
+                let resolved = b_cfg.addr.parse::<SocketAddr>().ok().or_else(|| {
+                    use std::net::ToSocketAddrs;
+                    b_cfg
+                        .addr
+                        .to_socket_addrs()
+                        .ok()
+                        .and_then(|mut iter| iter.next())
+                });
+                if let Some(addr) = resolved {
                     // Check if existing backend can be reused to preserve health and state
                     let backend =
                         if let Some(existing) = existing_backends.iter().find(|b| b.addr == addr) {

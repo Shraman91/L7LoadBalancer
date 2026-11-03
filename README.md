@@ -1,5 +1,9 @@
 # l7lb: Production-Grade Layer 7 HTTP Reverse Proxy and Load Balancer
 
+[![CI / CD](https://github.com/Shraman91/L7LoadBalancer/actions/workflows/ci.yml/badge.svg)](https://github.com/Shraman91/L7LoadBalancer/actions/workflows/ci.yml)
+[![Rust](https://img.shields.io/badge/rust-1.80%2B-blue.svg)](https://www.rust-lang.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
 A high-performance, fault-tolerant Layer 7 (HTTP/1.1 and HTTP/2) reverse proxy and load balancer written in Rust directly on top of `tokio` and `hyper` (no web framework). Built for extreme reliability, low latency, and zero-downtime operations, `l7lb` enforces lock-free atomic operations on the hot path, end-to-end streaming bodies with zero heap buffering, multi-pool content-based routing, adaptive load balancing algorithms, per-client IP rate limiting, circuit breakers with retries and jitter, and full Prometheus observability.
 
 ---
@@ -9,7 +13,7 @@ A high-performance, fault-tolerant Layer 7 (HTTP/1.1 and HTTP/2) reverse proxy a
 - **Lock-Free Hot Path**: Routing and backend selection execute without acquiring `Mutex` or `RwLock`. Shared state is coordinated via atomic operations (`AtomicUsize`, `AtomicBool`), atomic compare-and-swap (CAS), and `arc-swap` pointer swaps.
 - **End-to-End Streaming**: Request and response payloads stream continuously between client and upstream backends. Payloads are never buffered into memory, preserving a flat memory profile even under multi-gigabyte transfers.
 - **Resilience Against Cascading Failures**: Independent per-backend atomic circuit breakers, passive failure tracking, moving-window retry budgets with jitter, and slow-start traffic ramping prevent thundering herds and retry storms.
-- **Zero-Downtime Dynamic Configuration**: SIGHUP signals and automatic file-watcher notifications trigger atomic pointer swaps (`ArcSwap`) that update routes, pools, and thresholds without dropping in-flight connections or losing backend health history.
+- **Zero-Downtime Dynamic Configuration**: SIGHUP signals and administrative actions trigger atomic pointer swaps (`ArcSwap`) that update routes, pools, and thresholds without dropping in-flight connections or losing backend health history.
 - **Defense in Depth**: Front-end TLS termination via `rustls` (restricted to TLS 1.2 and TLS 1.3 only), 64-shard concurrent token-bucket rate limiting, and global concurrency caps with graceful load shedding.
 
 ---
@@ -17,72 +21,82 @@ A high-performance, fault-tolerant Layer 7 (HTTP/1.1 and HTTP/2) reverse proxy a
 ## System Architecture
 
 ```
-                                  CLIENT TRAFFIC
-                                        |
-                                        v
-                    +---------------------------------------+
-                    |           l7lb Listener               |
-                    |   (tokio::net::TcpListener :8080)     |
-                    +---------------------------------------+
-                                        |
-                                        v
-                    +---------------------------------------+
-                    |       TLS Termination (rustls)        |
-                    |    TLS 1.2/1.3, ALPN ("h2", "http/1.1")|
-                    +---------------------------------------+
-                                        |
-                                        v
-                    +---------------------------------------+
-                    |    Global Concurrency Check (CAS)     |
-                    |   In-Flight < max_concurrent_connections?
-                    |     No  -> 503 Service Unavailable    |
-                    |     Yes -> Acquire In-Flight Slot     |
-                    +---------------------------------------+
-                                        |
-                                        v
-                    +---------------------------------------+
-                    |   Sharded Token-Bucket Rate Limiter   |
-                    |   Per-Client IP (64 Concurrent Shards)|
-                    |     Exceeded -> 429 Too Many Requests |
-                    |                 + Retry-After header  |
-                    +---------------------------------------+
-                                        |
-                                        v
-                    +---------------------------------------+
-                    |      Content-Based L7 Router          |
-                    |   Host Matching -> Longest Prefix Path|
-                    |   Optional Prefix Stripping/Rewriting |
-                    +---------------------------------------+
-                                        |
-                                        v
-                    +---------------------------------------+
-                    |        Selected Backend Pool          |
-                    |  Algorithm: RR / WRR / LC / P2C / CH / LRT
-                    |  Filters: Healthy & Non-Draining Nodes|
-                    +---------------------------------------+
-                                        |
-                                        v
-                    +---------------------------------------+
-                    |       Circuit Breaker Evaluation      |
-                    |  Closed -> Normal Forward             |
-                    |  Open   -> Fast-fail / Try Next Node  |
-                    |  Half-Open -> Bounded Probe Trial     |
-                    +---------------------------------------+
-                                        |
-                                        v
-                    +---------------------------------------+
-                    |        Upstream Dispatch & Retry      |
-                    |  - Hop-by-hop headers stripped        |
-                    |  - X-Forwarded-*, X-Request-Id injected
-                    |  - Optional Upstream TLS / SNI        |
-                    |  - Idempotent Retry on 502/503/504    |
-                    +---------------------------------------+
-                          |             |             |
-                          v             v             v
-                    +-----------+ +-----------+ +-----------+
-                    | Backend 1 | | Backend 2 | | Backend 3 |
-                    |  :9001    | |  :9002    | |  :9003    |
-                    +-----------+ +-----------+ +-----------+
+                                      CLIENT TRAFFIC
+                                            |
+                                            v
+                        +---------------------------------------+
+                        |           l7lb Listener               |
+                        |   (tokio::net::TcpListener :8080)     |
+                        +---------------------------------------+
+                                            |
+                                            v
+                        +---------------------------------------+
+                        |       TLS Termination (rustls)        |
+                        |    TLS 1.2/1.3, ALPN ("h2", "http/1.1")|
+                        +---------------------------------------+
+                                            |
+                                            v
+                        +---------------------------------------+
+                        |    Global Concurrency Check (CAS)     |
+                        |   In-Flight < max_concurrent_connections?
+                        |     No  -> 503 Service Unavailable    |
+                        |     Yes -> Acquire In-Flight Slot     |
+                        +---------------------------------------+
+                                            |
+                                            v
+                        +---------------------------------------+
+                        |   Sharded Token-Bucket Rate Limiter   |
+                        |   Per-Client IP (64 Concurrent Shards)|
+                        |     Exceeded -> 429 Too Many Requests |
+                        |                 + Retry-After header  |
+                        +---------------------------------------+
+                                            |
+                                            v
+                        +---------------------------------------+
+                        |      Content-Based L7 Router          |
+                        |   Host Matching -> Longest Prefix Path|
+                        |   Optional Prefix Stripping/Rewriting |
+                        +---------------------------------------+
+                                            |
+                                            v
+                        +---------------------------------------+
+                        |        Selected Backend Pool          |
+                        |  Algorithm: RR / WRR / LC / P2C / CH / LRT
+                        |  Filters: Healthy & Non-Draining Nodes|
+                        +---------------------------------------+
+                                            |
+                                            v
+                        +---------------------------------------+
+                        |       Circuit Breaker Evaluation      |
+                        |  Closed -> Normal Forward             |
+                        |  Open   -> Fast-fail / Try Next Node  |
+                        |  Half-Open -> Bounded Probe Trial     |
+                        +---------------------------------------+
+                                            |
+                                            v
+                        +---------------------------------------+
+                        |        Upstream Dispatch & Retry      |
+                        |  - Hop-by-hop headers stripped        |
+                        |  - X-Forwarded-*, X-Request-Id injected
+                        |  - Optional Upstream TLS / SNI        |
+                        |  - Idempotent Retry on 502/503/504    |
+                        |  - WebSocket / Upgrade Passthrough    |
+                        +---------------------------------------+
+                              |             |             |
+                              v             v             v
+                        +-----------+ +-----------+ +-----------+
+                        | Backend 1 | | Backend 2 | | Backend 3 |
+                        |  :9001    | |  :9002    | |  :9003    |
+                        +-----------+ +-----------+ +-----------+
+
+                       ADMIN & OBSERVABILITY CONTROL PLANE (:8081)
+                        +---------------------------------------+
+                        | GET  /metrics (Prometheus Exporter)   |
+                        | GET  /admin/backends (Health & State) |
+                        | GET  /admin/config (Active Config)    |
+                        | POST /admin/backends/{addr}/drain     |
+                        | POST /admin/backends/{addr}/enable    |
+                        +---------------------------------------+
 ```
 
 ---
@@ -96,7 +110,8 @@ A high-performance, fault-tolerant Layer 7 (HTTP/1.1 and HTTP/2) reverse proxy a
 5. **Route Resolution**: The router evaluates configured route rules, matching by exact Host header and longest path prefix. The request path is rewritten or stripped if configured, and routed to the target backend pool.
 6. **Backend Selection**: The pool's configured balancing algorithm selects an optimal healthy backend node, excluding draining nodes and tripped circuit breakers.
 7. **Streaming Dispatch & Retries**: The request body streams directly to the upstream server. If the upstream server fails with a connection error or a 502/503/504 status, idempotent methods (`GET`, `HEAD`, `OPTIONS`, `PUT`, `DELETE`) retry against alternate healthy backends using exponential backoff with full jitter, governed by a moving-window retry token budget.
-8. **Observability & Response**: The response body streams back to the client. Prometheus counters, latency histograms, and structured JSON access logs (including request ID, status, latency, and retry count) are recorded.
+8. **WebSocket / Upgrade**: For 101 Switching Protocols responses, the connection transitions to a raw full-duplex tunnel using `tokio::io::copy_bidirectional`.
+9. **Observability & Logging**: The response body streams back to the client. Prometheus counters, latency histograms, and structured JSON access logs are emitted asynchronously.
 
 ---
 
@@ -105,12 +120,12 @@ A high-performance, fault-tolerant Layer 7 (HTTP/1.1 and HTTP/2) reverse proxy a
 Every pool defines its own load balancing strategy implementing the `LoadBalancer` trait:
 
 | Algorithm Key | Selection Strategy | Primary Use Case |
-|---|---|---|
+| :--- | :--- | :--- |
 | `round_robin` | Atomic round-robin cycling through all healthy backends. | Uniform backend clusters with uniform request processing costs. |
 | `weighted_round_robin` | Smooth interleaved weighted round-robin (Nginx-style) with dynamic slow-start weight ramping. | Clusters with heterogeneous hardware specifications. |
 | `least_connections` | Lock-free scan selecting the healthy backend with the fewest active connections. | Workloads with variable request execution times (e.g., long-lived queries). |
 | `power_of_two_choices` | Randomly samples two distinct healthy nodes and selects the one with fewer active connections. | Large-scale distributed deployments to avoid herd oscillations. |
-| `consistent_hash` | Ketama-style virtual node ring (128 vnodes per node) hashing on client IP, HTTP header, or cookie. | Stateful services, cache tiers, and sticky user sessions with ring failover. |
+| `consistent_hash` | Ketama-style virtual node ring (160 vnodes per node) hashing on client IP, HTTP header, or cookie. | Stateful services, cache tiers, and sticky user sessions with ring failover. |
 | `least_response_time` | Exponentially Weighted Moving Average (EWMA, alpha = 0.2) tracking backend latency, tie-breaking on active connections. | Dynamic cloud workloads with fluctuating upstream network or CPU performance. |
 
 ---
@@ -124,7 +139,7 @@ Every backend maintains an atomic circuit breaker operating across three states:
 - **HalfOpen**: A bounded number of trial requests are admitted. If trial requests succeed, the breaker resets to `Closed`. If any trial request fails, it transitions immediately back to `Open`.
 
 ### Idempotent Retries with Token Budget and Jitter
-- **Safety Guarantee**: Only idempotent HTTP methods (`GET`, `HEAD`, `OPTIONS`, `PUT`, `DELETE`, `TRACE`) with completed bodies are eligible for retry. Non-idempotent methods (`POST`, `PATCH`) and active streaming bodies are never retried to prevent double-execution.
+- **Safety Guarantee**: Only idempotent HTTP methods (`GET`, `HEAD`, `OPTIONS`, `PUT`, `DELETE`) with completed bodies are eligible for retry. Non-idempotent methods (`POST`, `PATCH`) and active streaming bodies are never retried to prevent double-execution.
 - **Exponential Backoff with Full Jitter**: Retries calculate backoff with decorrelated randomization between zero and $2^{\text{attempt}} \times \text{initial\_backoff}$.
 - **Token Budget**: A moving-window budget caps total retries at ~20% of recent traffic, preventing retry storms during upstream outages.
 
@@ -161,10 +176,10 @@ When a backend recovers from an unhealthy state, its effective weight starts at 
 ## Observability and Control Plane
 
 ### Prometheus Metrics (`GET /metrics`)
-Exposed on the administrative control plane port (default `127.0.0.1:9090`):
+Exposed on the administrative control plane port (default `127.0.0.1:8081`):
 
 | Metric Name | Type | Labels | Description |
-|---|---|---|---|
+| :--- | :--- | :--- | :--- |
 | `http_requests_total` | Counter | `pool`, `status` | Total HTTP requests handled by status code and pool |
 | `http_request_duration_seconds` | Histogram | `pool`, `status` | Request latency distribution across standard Prometheus buckets |
 | `active_connections` | Gauge | `pool`, `backend` | Real-time active connection count per backend |
@@ -195,41 +210,42 @@ Every request produces a structured JSON access log entry tagged with a unique r
 - If the client transmits `X-Request-Id`, it is preserved. If absent, a random 32-character hexadecimal request ID is generated.
 - The request ID is injected upstream to backends and returned downstream to clients in response headers.
 
-### Grafana Dashboard
-A ready-to-import dashboard is provided in [`docs/grafana-dashboard.json`](docs/grafana-dashboard.json) providing:
-- Overview row: QPS stat, Active Connections, 5xx Error Rate %, p99 Latency.
-- Traffic & Latency: Throughput by pool and status code, Latency percentiles (p50, p90, p99).
-- Fleet Health: Per-backend active connections and real-time health step graphs.
-- Traffic Control: Retries per second, rate-limited request counts, and load-shedding activity.
+---
+
+## Performance Benchmarks
+
+Comparative benchmark run using `oha` (50 concurrent connections, HTTP/1.1 keep-alive, 256-byte payload, 12-core x86_64 system):
+
+| Target Architecture | Throughput (req/sec) | Latency p50 | Latency p90 | Latency p99 | Latency p99.9 | Peak Memory (RSS) |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Direct Backend (Baseline)** | 82,450 req/s | 0.52 ms | 0.88 ms | 1.28 ms | 2.10 ms | 14.2 MB |
+| **L7LB (Rust / Tokio / Hyper)** | 71,820 req/s | 0.68 ms | 1.15 ms | 1.84 ms | 3.45 ms | 21.6 MB |
+| **NGINX 1.25 (Alpine Default)** | 64,310 req/s | 0.76 ms | 1.42 ms | 2.21 ms | 4.12 ms | 38.5 MB |
+
+For detailed analysis, latency histograms, and methodology, see [`docs/benchmarks.md`](docs/benchmarks.md).
 
 ---
 
-## Admin API Reference
+## One-Command Demo (Docker Compose)
 
-The administrative server runs on a dedicated, isolated port (default `127.0.0.1:9090`):
+Launch a full production-like environment with `l7lb`, three mock upstream backends, Prometheus, and Grafana:
 
 ```bash
-# 1. Scrape Prometheus metrics
-curl http://127.0.0.1:9090/metrics
-
-# 2. Inspect real-time fleet health, active connections, circuit state, and EWMA latency
-curl http://127.0.0.1:9090/admin/backends
-
-# 3. Inspect active configuration state
-curl http://127.0.0.1:9090/admin/config
-
-# 4. Gracefully drain a backend (stops receiving new traffic, in-flight completes)
-curl -X POST http://127.0.0.1:9090/admin/backends/127.0.0.1:9001/drain
-
-# 5. Re-enable a drained backend
-curl -X POST http://127.0.0.1:9090/admin/backends/127.0.0.1:9001/enable
+docker compose up --build
 ```
+
+### Endpoints in Demo Environment
+
+- **Load Balancer Proxy**: `http://localhost:8080/`
+- **Admin API & Prometheus Exporter**: `http://localhost:8081/admin/backends` and `http://localhost:8081/metrics`
+- **Prometheus UI**: `http://localhost:9090/`
+- **Grafana Dashboard**: `http://localhost:3000/` (credentials: `admin` / `admin`, auto-provisioned with `docs/grafana-dashboard.json`)
 
 ---
 
 ## Configuration Reference
 
-A complete multi-pool configuration is defined in [`config.multi-pool.toml`](config.multi-pool.toml):
+A complete multi-pool configuration is defined below:
 
 ```toml
 listen_addr = "0.0.0.0:8080"
@@ -237,19 +253,18 @@ default_pool = "web"
 
 [admin]
 enabled = true
-addr = "127.0.0.1:9090"
+addr = "0.0.0.0:8081"
 
 [timeouts]
 connect_secs = 3
-idle_keepalive_secs = 60
-request_timeout_secs = 10
 upstream_response_header_secs = 5
 client_header_read_secs = 5
+idle_keepalive_secs = 60
 
 [limits]
-max_request_header_size_bytes = 65536
+max_request_header_size_bytes = 16384
 max_body_size_bytes = 10485760 # 10 MB (0 for unlimited)
-max_concurrent_connections = 5000 # 0 for unlimited
+max_concurrent_connections = 1000
 
 [tls]
 enabled = false
@@ -260,131 +275,101 @@ alpn = ["h2", "http/1.1"]
 [rate_limit]
 enabled = true
 requests_per_second = 100.0
-burst = 50
-max_entries = 100000
-cleanup_interval_secs = 60
+burst = 150
+max_entries = 10000
+cleanup_interval_secs = 30
 
-[access_log]
-enabled = true
-format = "json" # "json" or "text"
+[circuit_breaker]
+failure_threshold = 3
+cooldown_secs = 10
+half_open_max_trials = 2
+half_open_successes_to_close = 2
 
 [retry]
 enabled = true
 max_attempts = 3
-initial_backoff_ms = 50
+initial_backoff_ms = 100
 max_backoff_ms = 1000
-retry_budget_percent = 20
+budget_ratio = 0.20
+min_retry_tokens = 10
 
-[circuit_breaker]
+[passive_health_check]
 enabled = true
-consecutive_failures = 5
-cooldown_secs = 15
-half_open_max_trials = 3
-half_open_successes_to_close = 2
+unhealthy_threshold = 3
 
 [slow_start]
 enabled = true
-window_secs = 30
+window_secs = 15
 
-[health_check]
-path = "/health"
-interval_secs = 5
-timeout_secs = 2
-unhealthy_threshold = 3
-healthy_threshold = 2
+[shutdown]
+drain_timeout_secs = 10
 
-# Routing rules (evaluated in order, longest prefix match wins)
-[[routes]]
-host = "api.example.com"
-path_prefix = "/api/v1/"
-pool = "api"
-strip_prefix = true
+[access_log]
+enabled = true
+format = "json"
 
-[[routes]]
-path_prefix = "/user/"
-pool = "stateful"
-rewrite_prefix = "/internal/user/"
-
-# Pools
 [pools.web]
-algorithm = "least_response_time"
+algorithm = "round_robin"
+
+[pools.web.health_check]
+path = "/health"
+interval_secs = 3
+timeout_secs = 2
+unhealthy_threshold = 2
+healthy_threshold = 2
 
 [[pools.web.backends]]
 addr = "127.0.0.1:9001"
-weight = 1
+weight = 3
 
 [[pools.web.backends]]
 addr = "127.0.0.1:9002"
 weight = 2
 
-[pools.api]
-algorithm = "power_of_two_choices"
-
-[[pools.api.backends]]
-addr = "127.0.0.1:9011"
+[[pools.web.backends]]
+addr = "127.0.0.1:9003"
 weight = 1
 
-[[pools.api.backends]]
-addr = "127.0.0.1:9012"
-weight = 1
-
-[pools.stateful]
-algorithm = "consistent_hash"
-hash_key = "cookie:SESSIONID" # or "client_ip", "header:X-User-Id"
-
-[[pools.stateful.backends]]
-addr = "127.0.0.1:9021"
-weight = 1
+[[routes]]
+path_prefix = "/"
+pool = "web"
 ```
 
 ---
 
-## Behavior and Limitations
+## Behaviour & Limitations
 
-- **All Backends Down**: If all backends in a pool are unhealthy or open in circuit breaking, `l7lb` returns a clean HTTP `503 Service Unavailable` with body `503 Service Unavailable: No healthy backends\n`.
-- **Streamed Request Safety**: Requests with streaming request bodies where `is_end_stream()` is false are never retried after initial transmission starts, preventing duplicate payload delivery to multiple backends.
-- **WebSocket / HTTP Upgrade**: `l7lb` supports 101 Switching Protocols. Once upgraded, bytes stream bidirectionally through `tokio::io::copy_bidirectional` without HTTP framing inspection.
-- **Hop-by-Hop Headers**: RFC 7230 / RFC 9110 compliant removal ensures hop-by-hop headers are never forwarded upstream or downstream.
+- **All Backends Down**: When no healthy backends exist in the selected pool, `l7lb` returns a clean `503 Service Unavailable` with body `503 Service Unavailable: No healthy backends\n`.
+- **Connect Failures vs Upstream Timeouts**:
+  - Upstream connection failures emit `502 Bad Gateway`.
+  - Upstream response header timeouts emit `504 Gateway Timeout`.
+  - Client header read timeouts emit `408 Request Timeout`.
+  - Excessive request header byte lengths emit `431 Request Header Fields Too Large`.
+  - Excessive request body byte lengths emit `413 Payload Too Large`.
+- **Idempotent Retries**: Only `GET`, `HEAD`, `OPTIONS`, `PUT`, and `DELETE` requests with complete bodies are retried upon connect failure or upstream `502`/`503`/`504`. Streaming bodies (`is_end_stream() == false`) are never buffered or retried to preserve deterministic upstream semantics.
+- **WebSocket / Upgrade**: Requests bearing `Upgrade: websocket` are forwarded with `101 Switching Protocols` support. Upon upgrade confirmation, client and upstream connections are bridged using full-duplex TCP streaming (`tokio::io::copy_bidirectional`).
+- **Hop-by-Hop Header Sanitization**: In compliance with RFC 7230, `Connection`, `Keep-Alive`, `Proxy-Authenticate`, `Proxy-Authorization`, `TE`, `Trailer`, `Transfer-Encoding`, and `Upgrade` (unless an upgrade is negotiated) are stripped in both inbound and outbound directions.
+- **Forwarded Headers**: Inbound requests have `X-Forwarded-For` appended with the client IP, `X-Forwarded-Proto` set to `https` or `http`, and `X-Forwarded-Host` set to the incoming `Host` header.
 
 ---
 
-## Getting Started
+## Continuous Fuzzing
 
-### 1. Build
+The repository includes LibFuzzer targets under `fuzz/`:
+
 ```bash
-cargo build --release
-```
+# Fuzz TOML configuration parser and validator
+cargo fuzz run fuzz_config_parser
 
-### 2. Start Mock Backends
-Run mock backends in separate terminals:
-```bash
-cargo run --bin mock_backend -- 9001
-cargo run --bin mock_backend -- 9002
-cargo run --bin mock_backend -- 9003
-```
-
-### 3. Launch Load Balancer
-```bash
-cargo run --bin l7lb -- --config config.multi-pool.toml
-```
-
-### 4. Send Test Traffic
-```bash
-# Standard request
-curl -i http://127.0.0.1:8080/
-
-# Custom trace request
-curl -i -H "X-Request-Id: my-trace-id-123" http://127.0.0.1:8080/
-
-# Inspect metrics
-curl -s http://127.0.0.1:9090/metrics | grep http_requests_total
+# Fuzz HTTP header sanitization routines
+cargo fuzz run fuzz_header_sanitization
 ```
 
 ---
 
-## Running Test Suite
+## Running the Automated Test Suite
 
-Run the full automated test suite covering all phases (reliability, routing algorithms, security, and observability):
+Run the full end-to-end test suite across all 5 phases:
 
 ```bash
 cargo test
