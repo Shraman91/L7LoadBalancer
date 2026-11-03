@@ -1,7 +1,7 @@
 use crate::proxy;
 use crate::state::{AppState, AppStateHolder};
 use hyper::service::service_fn;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder as ConnBuilder;
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
@@ -16,7 +16,8 @@ pub async fn run(
     cancel_token: CancellationToken,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(listen_addr).await?;
-    tracing::info!(%listen_addr, "l7lb listening");
+    let is_tls = state_holder.load().config.tls.enabled;
+    tracing::info!(%listen_addr, tls = is_tls, "l7lb listening");
 
     loop {
         tokio::select! {
@@ -33,11 +34,14 @@ pub async fn run(
                     }
                 };
 
-                let io = TokioIo::new(stream);
                 let state_holder = Arc::clone(&state_holder);
                 let current_state = state_holder.load();
+                let tls_acceptor = current_state.tls_acceptor.clone();
                 let header_read_timeout = Duration::from_secs(
                     current_state.config.timeouts.client_header_read_secs.max(1),
+                );
+                let handshake_timeout = Duration::from_secs(
+                    current_state.config.timeouts.connect_secs.max(5),
                 );
 
                 tokio::spawn(async move {
@@ -47,10 +51,33 @@ pub async fn run(
                     });
 
                     let mut builder = ConnBuilder::new(TokioExecutor::new());
-                    builder.http1().header_read_timeout(header_read_timeout);
+                    builder
+                        .http1()
+                        .timer(TokioTimer::new())
+                        .header_read_timeout(header_read_timeout);
+                    builder.http2().timer(TokioTimer::new());
 
-                    if let Err(e) = builder.serve_connection(io, service).await {
-                        tracing::debug!(error = %e, client = %client_addr, "connection closed with error");
+                    if let Some(acceptor) = tls_acceptor {
+                        let tls_stream = match tokio::time::timeout(handshake_timeout, acceptor.accept(stream)).await {
+                            Ok(Ok(s)) => s,
+                            Ok(Err(e)) => {
+                                tracing::debug!(error = %e, client = %client_addr, "TLS handshake failed");
+                                return;
+                            }
+                            Err(_) => {
+                                tracing::warn!(client = %client_addr, "TLS handshake timed out");
+                                return;
+                            }
+                        };
+                        let io = TokioIo::new(tls_stream);
+                        if let Err(e) = builder.serve_connection(io, service).await {
+                            tracing::debug!(error = %e, client = %client_addr, "TLS connection closed with error");
+                        }
+                    } else {
+                        let io = TokioIo::new(stream);
+                        if let Err(e) = builder.serve_connection(io, service).await {
+                            tracing::debug!(error = %e, client = %client_addr, "connection closed with error");
+                        }
                     }
                 });
             }

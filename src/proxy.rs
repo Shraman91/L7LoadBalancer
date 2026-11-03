@@ -46,6 +46,15 @@ pub fn sanitize_request_headers(
     client_addr: SocketAddr,
     is_upgrade: bool,
 ) {
+    sanitize_request_headers_with_tls(headers, client_addr, is_upgrade, false);
+}
+
+pub fn sanitize_request_headers_with_tls(
+    headers: &mut HeaderMap,
+    client_addr: SocketAddr,
+    is_upgrade: bool,
+    is_tls: bool,
+) {
     let mut extra_hop_by_hop = Vec::new();
     if let Some(conn_val) = headers.get(hyper::header::CONNECTION) {
         if let Ok(conn_str) = conn_val.to_str() {
@@ -91,7 +100,8 @@ pub fn sanitize_request_headers(
 
     let x_fp = HeaderName::from_static("x-forwarded-proto");
     if !headers.contains_key(&x_fp) {
-        headers.insert(x_fp, HeaderValue::from_static("http"));
+        let proto = if is_tls { "https" } else { "http" };
+        headers.insert(x_fp, HeaderValue::from_static(proto));
     }
 
     let x_fh = HeaderName::from_static("x-forwarded-host");
@@ -140,18 +150,69 @@ fn headers_byte_size(headers: &HeaderMap) -> usize {
         .sum()
 }
 
+struct InFlightGuard(Arc<AppState>);
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.0.in_flight_requests.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 pub async fn handle(
     state: Arc<AppState>,
     client_addr: SocketAddr,
     req: Request<Incoming>,
 ) -> Result<Response<BoxedBody>, hyper::Error> {
-    state.in_flight_requests.fetch_add(1, Ordering::Relaxed);
+    // 1. Global concurrency limit with load shedding (503)
+    let max_conn = state.config.limits.max_concurrent_connections;
+    if max_conn > 0 {
+        let mut current = state.in_flight_requests.load(Ordering::Relaxed);
+        loop {
+            if current >= max_conn {
+                state.load_shed_count.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    client = %client_addr,
+                    current,
+                    max_conn,
+                    "load shedding: global concurrency limit reached"
+                );
+                return Ok(error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "503 Service Unavailable: Server Overloaded\n",
+                ));
+            }
+            match state.in_flight_requests.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
+    } else {
+        state.in_flight_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    let _guard = InFlightGuard(Arc::clone(&state));
     state.retry_budget.record_request();
 
-    let res = handle_inner(state.clone(), client_addr, req).await;
+    // 2. Rate limiting per client IP (429 with Retry-After)
+    if let Some(ref limiter) = state.rate_limiter {
+        if let Err(retry_after) = limiter.check(client_addr.ip()) {
+            state.rate_limited_count.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(client = %client_addr, retry_after, "rate limit exceeded");
+            return Ok(Response::builder()
+                .status(StatusCode::TOO_MANY_REQUESTS)
+                .header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .header(hyper::header::RETRY_AFTER, retry_after.to_string())
+                .body(full_body("429 Too Many Requests\n"))
+                .unwrap());
+        }
+    }
 
-    state.in_flight_requests.fetch_sub(1, Ordering::Relaxed);
-    res
+    handle_inner(state.clone(), client_addr, req).await
 }
 
 async fn handle_inner(
@@ -261,8 +322,10 @@ async fn handle_inner(
         1
     };
 
-    let mut excluded_backends = Vec::new();
+    let mut excluded_backends: Vec<SocketAddr> = Vec::new();
     let mut attempt = 0;
+
+    let is_client_tls = state.tls_acceptor.is_some();
 
     loop {
         attempt += 1;
@@ -274,8 +337,8 @@ async fn handle_inner(
         ) {
             Some(b) => b,
             None => {
-                if attempt == 1 {
-                    tracing::warn!(pool = %pool.name, "no healthy backends available in pool");
+                if excluded_backends.is_empty() {
+                    tracing::warn!(pool = %pool.name, "no healthy backends available");
                     return Ok(error_response(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "503 Service Unavailable: No healthy backends\n",
@@ -290,7 +353,17 @@ async fn handle_inner(
             }
         };
 
-        let new_uri_str = format!("http://{}{}", backend.addr, target_path_and_query);
+        let scheme = if backend.is_tls() { "https" } else { "http" };
+        let authority = if let Some(ref sni) = backend.tls_sni() {
+            if sni.contains(':') {
+                sni.clone()
+            } else {
+                format!("{}:{}", sni, backend.addr.port())
+            }
+        } else {
+            backend.addr.to_string()
+        };
+        let new_uri_str = format!("{}://{}{}", scheme, authority, target_path_and_query);
         let new_uri = match new_uri_str.parse::<Uri>() {
             Ok(u) => u,
             Err(e) => {
@@ -303,7 +376,7 @@ async fn handle_inner(
         };
 
         let mut headers = original_headers.clone();
-        sanitize_request_headers(&mut headers, client_addr, is_upgrade);
+        sanitize_request_headers_with_tls(&mut headers, client_addr, is_upgrade, is_client_tls);
 
         let mut builder = Request::builder().method(method.clone()).uri(new_uri);
         for (k, v) in headers.iter() {

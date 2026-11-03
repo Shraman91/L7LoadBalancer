@@ -1,8 +1,10 @@
 use crate::backend::Backend;
 use crate::config::HealthCheckConfig;
+use crate::tls::create_https_connector;
 use bytes::Bytes;
 use http_body_util::Empty;
 use hyper::Request;
+use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
@@ -10,14 +12,18 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-pub type HttpClient = Client<HttpConnector, Empty<Bytes>>;
+pub type HttpClient = Client<HttpsConnector<HttpConnector>, Empty<Bytes>>;
 
 pub fn spawn_health_checks(
     backends: Vec<Arc<Backend>>,
     cfg: HealthCheckConfig,
     cancel: CancellationToken,
 ) {
-    let client: HttpClient = Client::builder(TokioExecutor::new()).build(HttpConnector::new());
+    let has_insecure = backends.iter().any(|b| b.is_tls() && b.is_tls_insecure());
+    let mut connector = HttpConnector::new();
+    connector.set_connect_timeout(Some(Duration::from_secs(cfg.timeout_secs.max(1))));
+    let https_connector = create_https_connector(connector, has_insecure);
+    let client: HttpClient = Client::builder(TokioExecutor::new()).build(https_connector);
 
     for backend in backends {
         let client = client.clone();
@@ -42,7 +48,13 @@ pub fn spawn_health_checks(
 }
 
 async fn probe(client: &HttpClient, backend: &Backend, cfg: &HealthCheckConfig) -> bool {
-    let uri = format!("http://{}{}", backend.addr, cfg.path);
+    let scheme = if backend.is_tls() { "https" } else { "http" };
+    let host = if let Some(ref sni) = backend.tls_sni() {
+        sni.clone()
+    } else {
+        backend.addr.to_string()
+    };
+    let uri = format!("{}://{}{}", scheme, host, cfg.path);
     let req = match Request::get(&uri).body(Empty::<Bytes>::new()) {
         Ok(r) => r,
         Err(e) => {

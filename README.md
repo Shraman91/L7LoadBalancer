@@ -57,6 +57,12 @@ Client ──► l7lb ────┼──────────► Backend :
 - **Path Transformation**: Supports prefix stripping (`strip_prefix = true`) and prefix rewriting (`rewrite_prefix = "/internal/..."`), preserving query strings.
 - **Default Fallback**: Transparently routes unmatched traffic to `default_pool`.
 
+### 6. Security & Traffic Control
+- **TLS Termination (`rustls`)**: Secure front-end HTTPS termination enforcing TLS 1.2+ only, with automatic ALPN negotiation (`h2`, `http/1.1`). Dynamically reloads certificates on SIGHUP / config changes without restart. Automatically propagates `X-Forwarded-Proto: https`.
+- **Upstream Backend TLS**: End-to-end encryption to upstream servers (`tls = true`), supporting custom SNI hostnames and optional insecure certificate mode for testing.
+- **Token Bucket Rate Limiting**: Per-client IP rate limiter sharded across 64 concurrent locks to prevent lock contention on the hot path. Returns standard `429 Too Many Requests` with `Retry-After: <seconds>` headers and bounded memory with automatic idle entry eviction.
+- **Global Concurrency Limit & Load Shedding**: Configurable `max_concurrent_connections` using atomic compare-and-swap (CAS). When overloaded, excess connections degrade gracefully with `503 Service Unavailable ("Server Overloaded: global concurrency limit reached")`.
+
 ---
 
 ## Architecture
@@ -99,6 +105,24 @@ default_pool = "web"
 [admin]
 enabled = true
 addr = "127.0.0.1:9090"
+
+[limits]
+max_concurrent_connections = 1000 # 0 for unlimited, or load shed with 503
+
+# TLS Termination (optional)
+[tls]
+enabled = false
+cert_path = "certs/cert.pem"
+key_path = "certs/key.pem"
+alpn = ["h2", "http/1.1"]
+
+# Rate limiting per client IP (token bucket)
+[rate_limit]
+enabled = true
+requests_per_second = 100.0
+burst = 50
+max_entries = 100000
+cleanup_interval_secs = 60
 
 # Routing rules (longest prefix match)
 [[routes]]

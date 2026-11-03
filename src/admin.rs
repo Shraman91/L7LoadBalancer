@@ -22,6 +22,7 @@ pub struct BackendStatus {
     pub circuit_state: String,
     pub weight: u32,
     pub ewma_latency_ms: f64,
+    pub tls: bool,
 }
 
 fn json_response<T: Serialize>(
@@ -112,6 +113,7 @@ pub async fn handle_admin_request<B>(
                     circuit_state: b.circuit_breaker.state_str().to_string(),
                     weight: b.weight(),
                     ewma_latency_ms: b.ewma_latency_ms(),
+                    tls: b.is_tls(),
                 });
             }
             json_response(StatusCode::OK, &list)

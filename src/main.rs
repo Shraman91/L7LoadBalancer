@@ -6,10 +6,12 @@ pub mod config;
 pub mod error;
 pub mod health;
 pub mod proxy;
+pub mod rate_limit;
 pub mod retry;
 pub mod router;
 pub mod server;
 pub mod state;
+pub mod tls;
 
 use crate::config::Config;
 use crate::state::AppStateHolder;

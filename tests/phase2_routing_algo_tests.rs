@@ -463,10 +463,7 @@ async fn test_multi_pool_proxy_routing_end_to_end() {
         "main".to_string(),
         PoolConfig {
             algorithm: Algorithm::RoundRobin,
-            backends: vec![BackendConfig {
-                addr: addr_a.to_string(),
-                weight: 1,
-            }],
+            backends: vec![BackendConfig::new(addr_a.to_string(), 1)],
             health_check: None,
             hash_key: None,
         },
@@ -475,10 +472,7 @@ async fn test_multi_pool_proxy_routing_end_to_end() {
         "api".to_string(),
         PoolConfig {
             algorithm: Algorithm::PowerOfTwoChoices,
-            backends: vec![BackendConfig {
-                addr: addr_b.to_string(),
-                weight: 1,
-            }],
+            backends: vec![BackendConfig::new(addr_b.to_string(), 1)],
             health_check: None,
             hash_key: None,
         },

@@ -12,6 +12,24 @@ pub struct BackendConfig {
     pub addr: String,
     #[serde(default = "default_weight")]
     pub weight: u32,
+    #[serde(default)]
+    pub tls: bool,
+    #[serde(default)]
+    pub tls_sni: Option<String>,
+    #[serde(default)]
+    pub tls_insecure: bool,
+}
+
+impl BackendConfig {
+    pub fn new(addr: impl Into<String>, weight: u32) -> Self {
+        Self {
+            addr: addr.into(),
+            weight,
+            tls: false,
+            tls_sni: None,
+            tls_insecure: false,
+        }
+    }
 }
 
 fn default_weight() -> u32 {
@@ -108,6 +126,8 @@ pub struct LimitsConfig {
     pub max_request_header_size_bytes: usize,
     #[serde(default = "default_max_body_size")]
     pub max_body_size_bytes: usize, // 0 = unlimited
+    #[serde(default = "default_max_concurrent_connections")]
+    pub max_concurrent_connections: usize, // 0 = unlimited
 }
 
 impl Default for LimitsConfig {
@@ -115,6 +135,7 @@ impl Default for LimitsConfig {
         Self {
             max_request_header_size_bytes: default_max_request_header_size(),
             max_body_size_bytes: default_max_body_size(),
+            max_concurrent_connections: default_max_concurrent_connections(),
         }
     }
 }
@@ -124,6 +145,9 @@ fn default_max_request_header_size() -> usize {
 }
 fn default_max_body_size() -> usize {
     0 // unlimited by default
+}
+fn default_max_concurrent_connections() -> usize {
+    0 // 0 = unlimited by default
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -371,10 +395,87 @@ fn default_pool_name() -> String {
     "default".to_string()
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+pub struct TlsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub cert_path: String,
+    #[serde(default)]
+    pub key_path: String,
+    #[serde(default = "default_alpn")]
+    pub alpn: Vec<String>,
+}
+
+impl Default for TlsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cert_path: String::new(),
+            key_path: String::new(),
+            alpn: default_alpn(),
+        }
+    }
+}
+
+fn default_alpn() -> Vec<String> {
+    vec!["h2".to_string(), "http/1.1".to_string()]
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct RateLimitConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_rate_limit_rps")]
+    pub requests_per_second: f64,
+    #[serde(default = "default_rate_limit_burst")]
+    pub burst: u32,
+    #[serde(default = "default_rate_limit_max_entries")]
+    pub max_entries: usize,
+    #[serde(default = "default_rate_limit_cleanup_secs")]
+    pub cleanup_interval_secs: u64,
+}
+
+fn default_rate_limit_rps() -> f64 {
+    100.0
+}
+
+fn default_rate_limit_burst() -> u32 {
+    50
+}
+
+fn default_rate_limit_max_entries() -> usize {
+    10000
+}
+
+fn default_rate_limit_cleanup_secs() -> u64 {
+    30
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            requests_per_second: default_rate_limit_rps(),
+            burst: default_rate_limit_burst(),
+            max_entries: default_rate_limit_max_entries(),
+            cleanup_interval_secs: default_rate_limit_cleanup_secs(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct Config {
     #[serde(default = "default_listen_addr")]
     pub listen_addr: String,
+
+    // TLS Termination
+    #[serde(default)]
+    pub tls: TlsConfig,
+
+    // Rate Limiting
+    #[serde(default)]
+    pub rate_limit: RateLimitConfig,
 
     // Legacy / top-level pool settings (for backward-compatibility)
     #[serde(default = "default_algorithm")]
@@ -425,6 +526,24 @@ impl Config {
             .listen_addr
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid listen_addr {}: {}", self.listen_addr, e))?;
+
+        if self.tls.enabled {
+            if self.tls.cert_path.trim().is_empty() {
+                anyhow::bail!("tls is enabled but cert_path is not specified");
+            }
+            if self.tls.key_path.trim().is_empty() {
+                anyhow::bail!("tls is enabled but key_path is not specified");
+            }
+        }
+
+        if self.rate_limit.enabled {
+            if self.rate_limit.requests_per_second <= 0.0 {
+                anyhow::bail!("rate_limit requests_per_second must be greater than 0");
+            }
+            if self.rate_limit.burst == 0 {
+                anyhow::bail!("rate_limit burst must be greater than 0");
+            }
+        }
 
         if self.admin.enabled {
             let _: SocketAddr =

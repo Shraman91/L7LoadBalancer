@@ -5,9 +5,12 @@ use crate::balancer::{
 };
 use crate::config::{Algorithm, Config, HealthCheckConfig};
 use crate::proxy::BoxedBody;
+use crate::rate_limit::RateLimiter;
 use crate::retry::RetryBudget;
 use crate::router::Router;
+use crate::tls::create_https_connector;
 use arc_swap::ArcSwap;
+use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
@@ -17,9 +20,10 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 
-pub type ForwardingClient = Client<HttpConnector, BoxedBody>;
+pub type ForwardingClient = Client<HttpsConnector<HttpConnector>, BoxedBody>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HashKeyTarget {
@@ -62,6 +66,10 @@ pub struct AppState {
     pub config: Config,
     pub retry_budget: Arc<RetryBudget>,
     pub in_flight_requests: Arc<AtomicUsize>,
+    pub tls_acceptor: Option<Arc<TlsAcceptor>>,
+    pub rate_limiter: Option<Arc<RateLimiter>>,
+    pub load_shed_count: Arc<AtomicUsize>,
+    pub rate_limited_count: Arc<AtomicUsize>,
 }
 
 fn create_balancer(
@@ -96,7 +104,9 @@ impl AppState {
             config.timeouts.idle_keepalive_secs.max(1),
         )));
 
-        let client: ForwardingClient = Client::builder(TokioExecutor::new()).build(connector);
+        let has_insecure = backends.iter().any(|b| b.is_tls() && b.is_tls_insecure());
+        let https_connector = create_https_connector(connector, has_insecure);
+        let client: ForwardingClient = Client::builder(TokioExecutor::new()).build(https_connector);
         let retry_budget = Arc::new(RetryBudget::new(config.retry.to_runtime()));
         let in_flight_requests = Arc::new(AtomicUsize::new(0));
 
@@ -108,24 +118,116 @@ impl AppState {
         });
 
         let mut pools = HashMap::new();
+        pools.insert(
+            default_pool_name.clone(),
+            Arc::new(BackendPool {
+                name: default_pool_name.clone(),
+                algorithm: config.algorithm,
+                backends: backends.clone(),
+                balancer: create_balancer(config.algorithm, &backends, slow_start_duration),
+                health_check: config.health_check.clone(),
+                hash_target: None,
+            }),
+        );
+
+        let router = Router::new(&config.routes, default_pool_name.clone());
+
+        let tls_acceptor = if config.tls.enabled {
+            crate::tls::create_tls_acceptor(
+                &config.tls.cert_path,
+                &config.tls.key_path,
+                &config.tls.alpn,
+            )
+            .ok()
+            .map(Arc::new)
+        } else {
+            None
+        };
+
+        let rate_limiter = if config.rate_limit.enabled {
+            Some(Arc::new(RateLimiter::new(
+                config.rate_limit.requests_per_second,
+                config.rate_limit.burst,
+                config.rate_limit.max_entries,
+            )))
+        } else {
+            None
+        };
+
+        Self {
+            pools,
+            default_pool_name,
+            router,
+            backends,
+            balancer,
+            client,
+            config,
+            retry_budget,
+            in_flight_requests,
+            tls_acceptor,
+            rate_limiter,
+            load_shed_count: Arc::new(AtomicUsize::new(0)),
+            rate_limited_count: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    pub fn try_from_config(
+        config: Config,
+        existing_backends: &[Arc<Backend>],
+    ) -> anyhow::Result<Self> {
+        let mut connector = HttpConnector::new();
+        connector.set_connect_timeout(Some(Duration::from_secs(
+            config.timeouts.connect_secs.max(1),
+        )));
+        connector.set_keepalive(Some(Duration::from_secs(
+            config.timeouts.idle_keepalive_secs.max(1),
+        )));
+
+        let retry_budget = Arc::new(RetryBudget::new(config.retry.to_runtime()));
+        let in_flight_requests = Arc::new(AtomicUsize::new(0));
+
+        let default_pool_name = config.default_pool.clone();
+        let slow_start_duration = Duration::from_secs(if config.slow_start.enabled {
+            config.slow_start.window_secs
+        } else {
+            0
+        });
+
+        let cb_runtime = config.circuit_breaker.to_runtime();
         let effective = config.effective_pools();
+        let mut pools = HashMap::new();
+        let mut all_unique_backends: HashMap<SocketAddr, Arc<Backend>> = HashMap::new();
 
         for (name, pool_cfg) in &effective {
-            let pool_backends = if name == &default_pool_name && !backends.is_empty() {
-                backends.clone()
-            } else {
-                let cb_runtime = config.circuit_breaker.to_runtime();
-                pool_cfg
-                    .backends
-                    .iter()
-                    .filter_map(|b| {
-                        b.addr
-                            .parse()
-                            .ok()
-                            .map(|addr| Arc::new(Backend::new(addr, b.weight, cb_runtime.clone())))
-                    })
-                    .collect()
-            };
+            let mut pool_backends = Vec::new();
+            for b_cfg in &pool_cfg.backends {
+                if let Ok(addr) = b_cfg.addr.parse::<SocketAddr>() {
+                    // Check if existing backend can be reused to preserve health and state
+                    let backend =
+                        if let Some(existing) = existing_backends.iter().find(|b| b.addr == addr) {
+                            existing.set_weight(b_cfg.weight);
+                            existing.set_tls(b_cfg.tls);
+                            existing.set_tls_sni(b_cfg.tls_sni.clone());
+                            existing.set_tls_insecure(b_cfg.tls_insecure);
+                            Arc::clone(existing)
+                        } else if let Some(already_created) = all_unique_backends.get(&addr) {
+                            already_created.set_weight(b_cfg.weight);
+                            Arc::clone(already_created)
+                        } else {
+                            Arc::new(Backend::with_tls(
+                                addr,
+                                b_cfg.weight,
+                                cb_runtime.clone(),
+                                b_cfg.tls,
+                                b_cfg.tls_sni.clone(),
+                                b_cfg.tls_insecure,
+                            ))
+                        };
+
+                    all_unique_backends.insert(addr, Arc::clone(&backend));
+                    pool_backends.push(backend);
+                }
+            }
 
             let pool_balancer: Box<dyn LoadBalancer> =
                 create_balancer(pool_cfg.algorithm, &pool_backends, slow_start_duration);
@@ -151,88 +253,6 @@ impl AppState {
         }
 
         let router = Router::new(&config.routes, default_pool_name.clone());
-
-        Self {
-            pools,
-            default_pool_name,
-            router,
-            backends,
-            balancer,
-            client,
-            config,
-            retry_budget,
-            in_flight_requests,
-        }
-    }
-
-    pub fn from_config(config: Config, existing_backends: &[Arc<Backend>]) -> Self {
-        let mut connector = HttpConnector::new();
-        connector.set_connect_timeout(Some(Duration::from_secs(
-            config.timeouts.connect_secs.max(1),
-        )));
-        connector.set_keepalive(Some(Duration::from_secs(
-            config.timeouts.idle_keepalive_secs.max(1),
-        )));
-
-        let client: ForwardingClient = Client::builder(TokioExecutor::new()).build(connector);
-        let retry_budget = Arc::new(RetryBudget::new(config.retry.to_runtime()));
-        let in_flight_requests = Arc::new(AtomicUsize::new(0));
-
-        let default_pool_name = config.default_pool.clone();
-        let slow_start_duration = Duration::from_secs(if config.slow_start.enabled {
-            config.slow_start.window_secs
-        } else {
-            0
-        });
-
-        let cb_runtime = config.circuit_breaker.to_runtime();
-        let effective = config.effective_pools();
-        let mut pools = HashMap::new();
-        let mut all_unique_backends: HashMap<SocketAddr, Arc<Backend>> = HashMap::new();
-
-        for (name, pool_cfg) in &effective {
-            let mut pool_backends = Vec::new();
-            for b_cfg in &pool_cfg.backends {
-                if let Ok(addr) = b_cfg.addr.parse::<SocketAddr>() {
-                    // Check if existing backend can be reused to preserve health and state
-                    let backend =
-                        if let Some(existing) = existing_backends.iter().find(|b| b.addr == addr) {
-                            existing.set_weight(b_cfg.weight);
-                            Arc::clone(existing)
-                        } else if let Some(already_created) = all_unique_backends.get(&addr) {
-                            already_created.set_weight(b_cfg.weight);
-                            Arc::clone(already_created)
-                        } else {
-                            Arc::new(Backend::new(addr, b_cfg.weight, cb_runtime.clone()))
-                        };
-
-                    all_unique_backends.insert(addr, Arc::clone(&backend));
-                    pool_backends.push(backend);
-                }
-            }
-
-            let pool_balancer =
-                create_balancer(pool_cfg.algorithm, &pool_backends, slow_start_duration);
-            let hc = pool_cfg
-                .health_check
-                .clone()
-                .unwrap_or_else(|| config.health_check.clone());
-            let hash_target = pool_cfg.hash_key.as_deref().map(HashKeyTarget::parse);
-
-            pools.insert(
-                name.clone(),
-                Arc::new(BackendPool {
-                    name: name.clone(),
-                    algorithm: pool_cfg.algorithm,
-                    backends: pool_backends,
-                    balancer: pool_balancer,
-                    health_check: hc,
-                    hash_target,
-                }),
-            );
-        }
-
-        let router = Router::new(&config.routes, default_pool_name.clone());
         let backends: Vec<Arc<Backend>> = all_unique_backends.into_values().collect();
 
         let default_balancer = if let Some(p) = pools.get(&default_pool_name) {
@@ -241,7 +261,32 @@ impl AppState {
             Box::new(RoundRobin::new())
         };
 
-        Self {
+        let has_insecure = backends.iter().any(|b| b.is_tls() && b.is_tls_insecure());
+        let https_connector = create_https_connector(connector, has_insecure);
+        let client: ForwardingClient = Client::builder(TokioExecutor::new()).build(https_connector);
+
+        let tls_acceptor = if config.tls.enabled {
+            let acceptor = crate::tls::create_tls_acceptor(
+                &config.tls.cert_path,
+                &config.tls.key_path,
+                &config.tls.alpn,
+            )?;
+            Some(Arc::new(acceptor))
+        } else {
+            None
+        };
+
+        let rate_limiter = if config.rate_limit.enabled {
+            Some(Arc::new(RateLimiter::new(
+                config.rate_limit.requests_per_second,
+                config.rate_limit.burst,
+                config.rate_limit.max_entries,
+            )))
+        } else {
+            None
+        };
+
+        Ok(Self {
             pools,
             default_pool_name,
             router,
@@ -251,7 +296,15 @@ impl AppState {
             config,
             retry_budget,
             in_flight_requests,
-        }
+            tls_acceptor,
+            rate_limiter,
+            load_shed_count: Arc::new(AtomicUsize::new(0)),
+            rate_limited_count: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+
+    pub fn from_config(config: Config, existing_backends: &[Arc<Backend>]) -> Self {
+        Self::try_from_config(config, existing_backends).expect("valid configuration")
     }
 
     pub fn default_pool(&self) -> &Arc<BackendPool> {
@@ -276,9 +329,25 @@ pub struct AppStateHolder {
 }
 
 impl AppStateHolder {
+    pub fn from_state(state: Arc<AppState>) -> Arc<Self> {
+        Arc::new(Self {
+            inner: ArcSwap::new(state),
+            config_path: PathBuf::new(),
+            health_cancel: Mutex::new(None),
+        })
+    }
+
     pub fn new(config: Config, config_path: PathBuf) -> (Arc<Self>, CancellationToken) {
         let initial_cancel = CancellationToken::new();
         let state = AppState::from_config(config, &[]);
+
+        if let Some(ref limiter) = state.rate_limiter {
+            limiter.spawn_cleanup_task(
+                Duration::from_secs(state.config.rate_limit.cleanup_interval_secs),
+                initial_cancel.clone(),
+            );
+        }
+
         let holder = Arc::new(Self {
             inner: ArcSwap::new(Arc::new(state)),
             config_path,
@@ -303,7 +372,14 @@ impl AppStateHolder {
         };
 
         let current_state = self.inner.load_full();
-        let new_state = AppState::from_config(new_config, &current_state.backends);
+        let new_state = match AppState::try_from_config(new_config, &current_state.backends) {
+            Ok(s) => s,
+            Err(e) => {
+                let err_msg = format!("hot reload failed: state creation/TLS error: {e}");
+                tracing::error!(%err_msg);
+                return Err(err_msg);
+            }
+        };
 
         // Cancel previous health checks and setup new ones
         let new_cancel = CancellationToken::new();
@@ -319,6 +395,14 @@ impl AppStateHolder {
             crate::health::spawn_health_checks(
                 pool.backends.clone(),
                 pool.health_check.clone(),
+                new_cancel.clone(),
+            );
+        }
+
+        // Spawn rate limiter cleanup task if rate limiter is enabled
+        if let Some(ref limiter) = new_state.rate_limiter {
+            limiter.spawn_cleanup_task(
+                Duration::from_secs(new_state.config.rate_limit.cleanup_interval_secs),
                 new_cancel.clone(),
             );
         }

@@ -14,6 +14,9 @@ fn now_millis() -> u64 {
 pub struct Backend {
     pub addr: SocketAddr,
     pub weight: AtomicU32,
+    pub tls: AtomicBool,
+    pub tls_sni: parking_lot::RwLock<Option<String>>,
+    pub tls_insecure: AtomicBool,
 
     pub healthy: AtomicBool,
     pub draining: AtomicBool,
@@ -30,9 +33,23 @@ pub struct Backend {
 
 impl Backend {
     pub fn new(addr: SocketAddr, weight: u32, cb_config: CircuitBreakerConfig) -> Self {
+        Self::with_tls(addr, weight, cb_config, false, None, false)
+    }
+
+    pub fn with_tls(
+        addr: SocketAddr,
+        weight: u32,
+        cb_config: CircuitBreakerConfig,
+        tls: bool,
+        tls_sni: Option<String>,
+        tls_insecure: bool,
+    ) -> Self {
         Self {
             addr,
             weight: AtomicU32::new(weight),
+            tls: AtomicBool::new(tls),
+            tls_sni: parking_lot::RwLock::new(tls_sni),
+            tls_insecure: AtomicBool::new(tls_insecure),
 
             healthy: AtomicBool::new(true),
             draining: AtomicBool::new(false),
@@ -44,6 +61,30 @@ impl Backend {
             ewma_latency_micros: AtomicU64::new(0),
             circuit_breaker: CircuitBreaker::new(cb_config),
         }
+    }
+
+    pub fn is_tls(&self) -> bool {
+        self.tls.load(Ordering::Relaxed)
+    }
+
+    pub fn set_tls(&self, tls: bool) {
+        self.tls.store(tls, Ordering::Relaxed);
+    }
+
+    pub fn is_tls_insecure(&self) -> bool {
+        self.tls_insecure.load(Ordering::Relaxed)
+    }
+
+    pub fn set_tls_insecure(&self, insecure: bool) {
+        self.tls_insecure.store(insecure, Ordering::Relaxed);
+    }
+
+    pub fn tls_sni(&self) -> Option<String> {
+        self.tls_sni.read().clone()
+    }
+
+    pub fn set_tls_sni(&self, sni: Option<String>) {
+        *self.tls_sni.write() = sni;
     }
 
     pub fn weight(&self) -> u32 {
