@@ -71,6 +71,13 @@ pub struct AppState {
     pub load_shed_count: Arc<AtomicUsize>,
     pub rate_limited_count: Arc<AtomicUsize>,
     pub metrics: Arc<crate::metrics::Metrics>,
+    pub event_sender: tokio::sync::broadcast::Sender<crate::admin::AdminEvent>,
+}
+
+impl AppState {
+    pub fn emit_event(&self, event: crate::admin::AdminEvent) {
+        let _ = self.event_sender.send(event);
+    }
 }
 
 fn create_balancer(
@@ -170,6 +177,7 @@ impl AppState {
             load_shed_count: Arc::new(AtomicUsize::new(0)),
             rate_limited_count: Arc::new(AtomicUsize::new(0)),
             metrics: Arc::new(crate::metrics::Metrics::new().expect("valid metrics")),
+            event_sender: tokio::sync::broadcast::channel(256).0,
         }
     }
 
@@ -311,6 +319,7 @@ impl AppState {
             load_shed_count: Arc::new(AtomicUsize::new(0)),
             rate_limited_count: Arc::new(AtomicUsize::new(0)),
             metrics: Arc::new(crate::metrics::Metrics::new().expect("valid metrics")),
+            event_sender: tokio::sync::broadcast::channel(256).0,
         })
     }
 

@@ -29,6 +29,9 @@ pub struct Backend {
     pub healthy_since_millis: AtomicU64,
     pub ewma_latency_micros: AtomicU64,
     pub circuit_breaker: CircuitBreaker,
+
+    pub total_requests: AtomicU64,
+    pub total_errors: AtomicU64,
 }
 
 impl Backend {
@@ -60,7 +63,25 @@ impl Backend {
             healthy_since_millis: AtomicU64::new(now_millis()),
             ewma_latency_micros: AtomicU64::new(0),
             circuit_breaker: CircuitBreaker::new(cb_config),
+            total_requests: AtomicU64::new(0),
+            total_errors: AtomicU64::new(0),
         }
+    }
+
+    pub fn inc_requests(&self) {
+        self.total_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_errors(&self) {
+        self.total_errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn total_requests(&self) -> u64 {
+        self.total_requests.load(Ordering::Relaxed)
+    }
+
+    pub fn total_errors(&self) -> u64 {
+        self.total_errors.load(Ordering::Relaxed)
     }
 
     pub fn is_tls(&self) -> bool {

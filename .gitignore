@@ -1,3 +1,6 @@
 /target
 **/*.rs.bk
 Cargo.lock
+/dashboard/node_modules
+/dashboard/.next
+/dashboard/out

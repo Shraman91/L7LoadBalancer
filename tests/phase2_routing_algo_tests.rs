@@ -233,21 +233,59 @@ async fn test_admin_api_endpoints() {
     let resp = handle_admin_request(Arc::clone(&state_holder), req).await;
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // Get an existing backend from state
-    let state = state_holder.load();
-    let backend_addr = state.backends[0].addr;
-
-    // 3. POST /admin/backends/{addr}/drain
-    let drain_uri = format!("/admin/backends/{}/drain", backend_addr);
+    // 2b. GET /admin/stats
     let req = Request::builder()
-        .method(Method::POST)
-        .uri(drain_uri)
+        .method(Method::GET)
+        .uri("/admin/stats")
         .body(Full::new(Bytes::new()))
         .unwrap();
 
     let resp = handle_admin_request(Arc::clone(&state_holder), req).await;
     assert_eq!(resp.status(), StatusCode::OK);
+
+    // 2c. GET /admin/events (SSE)
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri("/admin/events")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+
+    let resp = handle_admin_request(Arc::clone(&state_holder), req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get("content-type").unwrap(),
+        "text/event-stream"
+    );
+
+    // Get an existing backend from state
+    let state = state_holder.load();
+    let backend_addr = state.backends[0].addr;
+
+    // Test token authentication on drain
+    std::env::set_var("L7LB_ADMIN_TOKEN", "test-auth-token-xyz");
+
+    let drain_uri = format!("/admin/backends/{}/drain", backend_addr);
+    // Missing token -> 401
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(&drain_uri)
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let resp = handle_admin_request(Arc::clone(&state_holder), req).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // With valid bearer token -> 200
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(&drain_uri)
+        .header("Authorization", "Bearer test-auth-token-xyz")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let resp = handle_admin_request(Arc::clone(&state_holder), req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
     assert!(state.backends[0].is_draining());
+
+    std::env::remove_var("L7LB_ADMIN_TOKEN");
 
     // 4. POST /admin/backends/{addr}/enable
     let enable_uri = format!("/admin/backends/{}/enable", backend_addr);

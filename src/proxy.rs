@@ -627,6 +627,7 @@ async fn handle_inner(
 
         let start_time = Instant::now();
         backend.inc_connections();
+        backend.inc_requests();
         let timeout_dur =
             Duration::from_secs(state.config.timeouts.upstream_response_header_secs.max(1));
         let upstream_call = state.client.request(upstream_req);
@@ -662,6 +663,7 @@ async fn handle_inner(
                 }
 
                 if status.is_server_error() {
+                    backend.inc_errors();
                     backend.record_passive_check(
                         false,
                         state.config.passive_health_check.unhealthy_threshold,
@@ -720,6 +722,7 @@ async fn handle_inner(
                 ));
             }
             Ok(Err(e)) => {
+                backend.inc_errors();
                 tracing::warn!(backend = %backend.addr, error = %e, attempt, "upstream connect/io error");
                 backend.record_passive_check(
                     false,
@@ -750,6 +753,7 @@ async fn handle_inner(
                 ));
             }
             Err(_) => {
+                backend.inc_errors();
                 tracing::warn!(backend = %backend.addr, attempt, "upstream response header timeout");
                 backend.record_passive_check(
                     false,

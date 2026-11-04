@@ -72,3 +72,17 @@ services:
       - prometheus
     restart: unless-stopped
 
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3001"
+    environment:
+      - L7LB_ADMIN_URL=http://l7lb:8081
+      - L7LB_PROXY_URL=http://l7lb:8080
+      - NEXT_PUBLIC_USE_MOCK=false
+    depends_on:
+      - l7lb
+    restart: unless-stopped
+

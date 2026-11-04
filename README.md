@@ -237,9 +237,40 @@ docker compose up --build
 ### Endpoints in Demo Environment
 
 - **Load Balancer Proxy**: `http://localhost:8080/`
+- **Admin Dashboard**: `http://localhost:3001/` (Next.js App Router, control plane)
 - **Admin API & Prometheus Exporter**: `http://localhost:8081/admin/backends` and `http://localhost:8081/metrics`
 - **Prometheus UI**: `http://localhost:9090/`
 - **Grafana Dashboard**: `http://localhost:3000/` (credentials: `admin` / `admin`, auto-provisioned with `docs/grafana-dashboard.json`)
+
+---
+
+## Admin & Observability Dashboard
+
+The repository includes a production-grade administrative dashboard located in [`dashboard/`](dashboard/), styled after modern B2B SaaS control planes (Linear, Vercel, Stripe).
+
+### Features & Capabilities
+
+- **Overview (`/`)**: Key metrics (req/s, 5xx error rate %, p50/p99 latency, active connections, healthy nodes) with sparklines, stacked throughput chart (2xx/4xx/5xx), latency percentiles, and protection counters (rate limits, load shedding, retries).
+- **Backend Fleet (`/backends`)**: Searchable, filterable, and sortable table with status badges, circuit breaker indicators, active connections, and EWMA latency. Supports operator drain and enable actions with confirmation modals, optimistic updates, and slide-over telemetry drawers.
+- **Topology Visualizer (`/topology`)**: Interactive React Flow diagram rendering `Listener -> Routes -> Pools -> Backends` with live status dots and dashed degradation links.
+- **Routes & Config (`/config`)**: Visual breakdown of active routing tables, pools, timeouts, and limits with syntax-highlighted TOML/JSON views and one-click copy.
+- **Audit & Incident Log (`/events`)**: Real-time event log tracking circuit state transitions, health checks, rate limit spikes, and administrative drain actions.
+- **Traffic Lab (`/lab`)**: Built-in HTTP load generator and operator chaos walkthrough demonstrating circuit breaker opening, retry storms mitigation, and slow-start recovery.
+- **Settings (`/settings`)**: Control plane connection settings, polling interval controls, and a standalone mock-mode toggle (`NEXT_PUBLIC_USE_MOCK=true`).
+
+### Running the Dashboard Locally
+
+```bash
+cd dashboard
+npm install
+npm run dev
+```
+
+Navigate to `http://localhost:3001`. To run in standalone mock mode without running the backend proxy:
+
+```bash
+NEXT_PUBLIC_USE_MOCK=true npm run dev
+```
 
 ---
 

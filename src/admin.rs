@@ -10,8 +10,41 @@ use hyper_util::server::conn::auto::Builder as ConnBuilder;
 use serde::Serialize;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+#[derive(Clone, Serialize, Debug)]
+pub struct AdminEvent {
+    pub id: String,
+    pub timestamp_ms: u64,
+    pub severity: String,
+    pub pool: Option<String>,
+    pub backend: Option<String>,
+    pub event_type: String,
+    pub message: String,
+}
+
+#[derive(Serialize)]
+pub struct BackendStats {
+    pub addr: String,
+    pub pool: String,
+    pub requests_total: u64,
+    pub errors_total: u64,
+    pub active_connections: usize,
+    pub ewma_latency_ms: f64,
+    pub circuit_state: String,
+    pub weight: u32,
+    pub healthy: bool,
+    pub draining: bool,
+}
 
 #[derive(Serialize)]
 pub struct BackendStatus {
@@ -23,6 +56,29 @@ pub struct BackendStatus {
     pub weight: u32,
     pub ewma_latency_ms: f64,
     pub tls: bool,
+}
+
+fn check_admin_auth<B>(req: &Request<B>) -> Option<Response<BoxBody<Bytes, hyper::Error>>> {
+    if let Ok(expected_token) = std::env::var("L7LB_ADMIN_TOKEN") {
+        let expected_token = expected_token.trim();
+        if !expected_token.is_empty() {
+            let auth_header = req
+                .headers()
+                .get(hyper::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok());
+
+            let expected_header = format!("Bearer {}", expected_token);
+            if auth_header != Some(&expected_header) {
+                return Some(error_json(
+                    StatusCode::UNAUTHORIZED,
+                    "unauthorized: missing or invalid bearer token",
+                ));
+            }
+        }
+    } else {
+        tracing::warn!("L7LB_ADMIN_TOKEN not set: admin mutation endpoints are unauthenticated");
+    }
+    None
 }
 
 fn json_response<T: Serialize>(
@@ -119,6 +175,54 @@ pub async fn handle_admin_request<B>(
             json_response(StatusCode::OK, &list)
         }
         (&Method::GET, "/admin/config") => json_response(StatusCode::OK, &state.config),
+        (&Method::GET, "/admin/stats") => {
+            let mut list = Vec::new();
+            for (pool_name, pool) in &state.pools {
+                for b in &pool.backends {
+                    list.push(BackendStats {
+                        addr: b.addr.to_string(),
+                        pool: pool_name.clone(),
+                        requests_total: b.total_requests(),
+                        errors_total: b.total_errors(),
+                        active_connections: b.connections(),
+                        ewma_latency_ms: b.ewma_latency_ms(),
+                        circuit_state: b.circuit_breaker.state_str().to_string(),
+                        weight: b.weight(),
+                        healthy: b.is_healthy(),
+                        draining: b.is_draining(),
+                    });
+                }
+            }
+            json_response(StatusCode::OK, &list)
+        }
+        (&Method::GET, "/admin/events") => {
+            let rx = state.event_sender.subscribe();
+            let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+                match rx.recv().await {
+                    Ok(event) => {
+                        let json =
+                            serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string());
+                        let frame =
+                            hyper::body::Frame::data(Bytes::from(format!("data: {}\n\n", json)));
+                        Some((Ok::<_, hyper::Error>(frame), rx))
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        let frame = hyper::body::Frame::data(Bytes::from(": lagged\n\n"));
+                        Some((Ok(frame), rx))
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
+                }
+            });
+            let body = http_body_util::StreamBody::new(stream);
+            let boxed: BoxBody<Bytes, hyper::Error> = http_body_util::BodyExt::boxed(body);
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(hyper::header::CONTENT_TYPE, "text/event-stream")
+                .header(hyper::header::CACHE_CONTROL, "no-cache")
+                .header(hyper::header::CONNECTION, "keep-alive")
+                .body(boxed)
+                .unwrap()
+        }
         (&Method::GET, "/metrics") => {
             let body = state.metrics.gather(&state);
             Response::builder()
@@ -131,6 +235,9 @@ pub async fn handle_admin_request<B>(
                 .unwrap()
         }
         (&Method::POST, p) if p.starts_with("/admin/backends/") && p.ends_with("/drain") => {
+            if let Some(unauth) = check_admin_auth(&req) {
+                return unauth;
+            }
             let prefix = "/admin/backends/";
             let suffix = "/drain";
             let addr_str = &p[prefix.len()..p.len() - suffix.len()];
@@ -138,6 +245,15 @@ pub async fn handle_admin_request<B>(
                 Ok(addr) => {
                     if let Some(backend) = state.find_backend(addr) {
                         backend.set_draining(true);
+                        state.emit_event(AdminEvent {
+                            id: format!("evt-{}", rand::random::<u32>()),
+                            timestamp_ms: now_millis(),
+                            severity: "info".to_string(),
+                            pool: None,
+                            backend: Some(addr.to_string()),
+                            event_type: "backend_drained".to_string(),
+                            message: format!("backend {} marked draining", addr),
+                        });
                         let res = serde_json::json!({
                             "status": "ok",
                             "message": "backend marked draining",
@@ -152,6 +268,9 @@ pub async fn handle_admin_request<B>(
             }
         }
         (&Method::POST, p) if p.starts_with("/admin/backends/") && p.ends_with("/enable") => {
+            if let Some(unauth) = check_admin_auth(&req) {
+                return unauth;
+            }
             let prefix = "/admin/backends/";
             let suffix = "/enable";
             let addr_str = &p[prefix.len()..p.len() - suffix.len()];
@@ -159,6 +278,15 @@ pub async fn handle_admin_request<B>(
                 Ok(addr) => {
                     if let Some(backend) = state.find_backend(addr) {
                         backend.set_draining(false);
+                        state.emit_event(AdminEvent {
+                            id: format!("evt-{}", rand::random::<u32>()),
+                            timestamp_ms: now_millis(),
+                            severity: "info".to_string(),
+                            pool: None,
+                            backend: Some(addr.to_string()),
+                            event_type: "backend_enabled".to_string(),
+                            message: format!("backend {} enabled", addr),
+                        });
                         let res = serde_json::json!({
                             "status": "ok",
                             "message": "backend enabled",

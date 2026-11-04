@@ -1,0 +1,47 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #FAFAFA;
+  --foreground: #0A0A0A;
+}
+
+body {
+  color: #0A0A0A;
+  background: #FAFAFA;
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Tabular figures for all metric numbers */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Subtle, clean focus states */
+*:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px #FFFFFF, 0 0 0 4px #0A0A0A;
+}
+
+/* Custom minimal scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #D4D4D8;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #A1A1AA;
+}
+
