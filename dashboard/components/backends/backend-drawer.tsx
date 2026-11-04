@@ -14,6 +14,12 @@ interface BackendDrawerProps {
 }
 
 export function BackendDrawer({ backend, onClose, onToggleDrain }: BackendDrawerProps) {
+  const [mounted, setMounted] = React.useState(false);
+
+  React.useEffect(() => {
+    setMounted(true);
+  }, []);
+
   if (!backend) return null;
 
   // Mock historical active connection trend for this backend
@@ -113,40 +119,46 @@ export function BackendDrawer({ backend, onClose, onToggleDrain }: BackendDrawer
                 <span className="text-[11px] text-foreground-muted font-mono">recent window</span>
               </div>
               <div className="h-28 w-full border border-border rounded-card p-2 bg-surface-subtle">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={connHistory}>
-                    <XAxis
-                      dataKey="t"
-                      tickLine={false}
-                      axisLine={false}
-                      tick={{ fill: "#A1A1AA", fontSize: 10, fontFamily: "JetBrains Mono" }}
-                    />
-                    <YAxis
-                      tickLine={false}
-                      axisLine={false}
-                      tick={{ fill: "#A1A1AA", fontSize: 10, fontFamily: "JetBrains Mono" }}
-                    />
-                    <Tooltip
-                      content={({ active, payload, label }) => {
-                        if (active && payload && payload.length) {
-                          return (
-                            <div className="bg-surface border border-border p-1.5 rounded text-[11px] font-mono shadow">
-                              {label}: {payload[0].value} conns
-                            </div>
-                          );
-                        }
-                        return null;
-                      }}
-                    />
-                    <Line
-                      type="monotone"
-                      dataKey="conns"
-                      stroke="#0A0A0A"
-                      strokeWidth={1.5}
-                      dot={{ r: 2, fill: "#0A0A0A" }}
-                    />
-                  </LineChart>
-                </ResponsiveContainer>
+                {mounted ? (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={connHistory}>
+                      <XAxis
+                        dataKey="t"
+                        tickLine={false}
+                        axisLine={false}
+                        tick={{ fill: "#A1A1AA", fontSize: 10, fontFamily: "JetBrains Mono" }}
+                      />
+                      <YAxis
+                        tickLine={false}
+                        axisLine={false}
+                        tick={{ fill: "#A1A1AA", fontSize: 10, fontFamily: "JetBrains Mono" }}
+                      />
+                      <Tooltip
+                        content={({ active, payload, label }) => {
+                          if (active && payload && payload.length) {
+                            return (
+                              <div className="bg-surface border border-border p-1.5 rounded text-[11px] font-mono shadow">
+                                {label}: {payload[0].value} conns
+                              </div>
+                            );
+                          }
+                          return null;
+                        }}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="conns"
+                        stroke="#0A0A0A"
+                        strokeWidth={1.5}
+                        dot={{ r: 2, fill: "#0A0A0A" }}
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center text-xs text-foreground-muted font-mono">
+                    Loading trend...
+                  </div>
+                )}
               </div>
             </div>
 

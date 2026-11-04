@@ -9,7 +9,7 @@ interface HeaderProps {
   subtitle?: string;
   onRefresh?: () => void;
   isRefreshing?: boolean;
-  lastUpdated?: Date;
+  lastUpdated?: Date | null;
 }
 
 export function Header({
@@ -20,6 +20,11 @@ export function Header({
   lastUpdated,
 }: HeaderProps) {
   const [timeRange, setTimeRange] = useState<"5m" | "15m" | "1h">("5m");
+  const [mounted, setMounted] = useState(false);
+
+  React.useEffect(() => {
+    setMounted(true);
+  }, []);
 
   return (
     <header className="h-14 px-8 border-b border-border bg-surface flex items-center justify-between shrink-0 select-none">
@@ -68,8 +73,11 @@ export function Header({
         </button>
 
         {/* Timestamp */}
-        {lastUpdated && (
-          <span className="text-[11px] text-foreground-muted font-mono hidden md:inline">
+        {mounted && lastUpdated && (
+          <span
+            suppressHydrationWarning
+            className="text-[11px] text-foreground-muted font-mono hidden md:inline"
+          >
             Updated {lastUpdated.toLocaleTimeString("en-US", { hour12: false })}
           </span>
         )}

@@ -27,6 +27,12 @@ const nodeTypes = {
 };
 
 export default function TopologyPage() {
+  const [mounted, setMounted] = React.useState(false);
+
+  React.useEffect(() => {
+    setMounted(true);
+  }, []);
+
   const { data: backends = [], refetch: refetchBackends, isRefetching } = useQuery({
     queryKey: ["backends"],
     queryFn: fetchBackends,
@@ -166,19 +172,25 @@ export default function TopologyPage() {
       />
 
       <main className="flex-1 w-full h-full bg-[#FAFAFA] relative">
-        <ReactFlow
-          nodes={nodes}
-          edges={edges}
-          nodeTypes={nodeTypes}
-          fitView
-          fitViewOptions={{ padding: 0.2 }}
-          minZoom={0.2}
-          maxZoom={1.5}
-          proOptions={{ hideAttribution: true }}
-        >
-          <Background color="#E4E4E7" gap={20} size={1} />
-          <Controls showInteractive={false} className="!bg-surface !border-border !rounded-card !shadow-sm" />
-        </ReactFlow>
+        {mounted ? (
+          <ReactFlow
+            nodes={nodes}
+            edges={edges}
+            nodeTypes={nodeTypes}
+            fitView
+            fitViewOptions={{ padding: 0.2 }}
+            minZoom={0.2}
+            maxZoom={1.5}
+            proOptions={{ hideAttribution: true }}
+          >
+            <Background color="#E4E4E7" gap={20} size={1} />
+            <Controls showInteractive={false} className="!bg-surface !border-border !rounded-card !shadow-sm" />
+          </ReactFlow>
+        ) : (
+          <div className="w-full h-full flex items-center justify-center text-xs text-foreground-muted font-mono">
+            Loading topology visualizer...
+          </div>
+        )}
       </main>
     </div>
   );

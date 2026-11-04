@@ -29,8 +29,10 @@ const NAV_ITEMS = [
 export function Sidebar() {
   const pathname = usePathname();
   const [mockActive, setMockActive] = useState(false);
+  const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
+    setMounted(true);
     setMockActive(isMockMode());
   }, []);
 
@@ -86,7 +88,7 @@ export function Sidebar() {
           <span className="text-foreground-secondary text-[11px] font-medium">Status</span>
           <span className="flex items-center gap-1 text-[11px] font-mono text-foreground">
             <Circle className="w-2 h-2 fill-[#15803D] text-[#15803D]" />
-            {mockActive ? "Mock Mode" : "Online"}
+            {mounted && mockActive ? "Mock Mode" : "Online"}
           </span>
         </div>
         <div className="flex items-center justify-between text-[11px] text-foreground-muted font-mono">

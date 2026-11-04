@@ -12,7 +12,7 @@ import { RecentEventsList } from "@/components/overview/recent-events";
 import { formatNumber } from "@/lib/utils";
 
 export default function OverviewPage() {
-  const [lastRefreshed, setLastRefreshed] = useState<Date>(new Date());
+  const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
 
   const {
     data: metrics,
